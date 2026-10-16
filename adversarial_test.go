@@ -88,14 +88,14 @@ func TestDomainMatchingRejectsFoldedUnicode(t *testing.T) {
 		is.True(!list.matches(name)) // name
 	}
 
-	wild, err := parseDomainPattern("*.example.com")
+	wild, err := parseDomainPattern(domWild)
 	is.NoErr(err)
 	is.True(!(domainsList{wild}).matches("K.example.com.evil"))
 	is.True((domainsList{wild}).matches("k.example.com"))
 }
 
 func FuzzParseDomainPattern(f *testing.F) {
-	for _, seed := range []string{"example.com", "*.example.com", "**.example.com", "", "*", "a.*.b", "K", "xn--bcher-kva.example", "a..b", strings.Repeat("a", 300)} {
+	for _, seed := range []string{domExample, domWild, domNested, "", "*", "a.*.b", "K", "xn--bcher-kva.example", "a..b", strings.Repeat("a", 300)} {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
@@ -126,11 +126,11 @@ func FuzzParseDomainPattern(f *testing.F) {
 }
 
 func FuzzDomainMatches(f *testing.F) {
-	for _, seed := range []string{"a.example.com", "example.com", "Kube.example.com", "A.B.EXAMPLE.COM.", "", ".", "..", "a..example.com"} {
+	for _, seed := range []string{domSub, domExample, "Kube.example.com", "A.B.EXAMPLE.COM.", "", ".", "..", "a..example.com"} {
 		f.Add(seed)
 	}
 	pats := make(domainsList, 0, 3)
-	for _, s := range []string{"example.com", "*.example.com", "**.example.org"} {
+	for _, s := range []string{domExample, domWild, "**.example.org"} {
 		p, err := parseDomainPattern(s)
 		if err != nil {
 			f.Fatal(err)
@@ -149,7 +149,7 @@ func FuzzDomainMatches(f *testing.F) {
 			}
 		}
 		lower := strings.ToLower(strings.TrimSuffix(name, "."))
-		if lower != "example.com" && !strings.HasSuffix(lower, ".example.com") && !strings.HasSuffix(lower, ".example.org") {
+		if lower != domExample && !strings.HasSuffix(lower, ".example.com") && !strings.HasSuffix(lower, ".example.org") {
 			t.Fatalf("%q matched but is not below a pattern's suffix", name)
 		}
 		if strings.Contains(lower, "..") || strings.HasPrefix(lower, ".") {
@@ -272,7 +272,7 @@ output:
 	is.NoErr(env.r.createContainerRules(context.Background(), c2, true))
 	p2 := env.dns.policy(cont1Addr)
 	is.True(p2 != nil)
-	is.True(!p2.Match("a.example.com"))
+	is.True(!p2.Match(domSub))
 	is.True(p2.Match("only.other.net"))
 }
 
