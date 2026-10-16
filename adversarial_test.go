@@ -46,7 +46,7 @@ func TestDomainMatchingAgainstReference(t *testing.T) {
 	t.Parallel()
 	is := is.New(t)
 
-	suffixes := []string{"example.com", "a.example.com", "com", "x-y.z.example.org"}
+	suffixes := []string{"example.com", "a.example.com", domTLD, "x-y.z.example.org"}
 	prefixes := []string{"", "a.", "b.", "a.b.", "a.b.c.", "x.", "evil", "evil.", ".", "-", "a-"}
 	for _, suffix := range suffixes {
 		for _, kind := range []domainKind{domainExact, domainWildcard, domainNested} {

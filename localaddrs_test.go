@@ -14,6 +14,11 @@ import (
 	"github.com/matryer/is"
 )
 
+const (
+	addrGW98     = "10.98.0.1"
+	driverBridge = "bridge"
+)
+
 func TestLocalAddrsContains(t *testing.T) {
 	t.Parallel()
 	is := is.New(t)
@@ -25,7 +30,7 @@ func TestLocalAddrsContains(t *testing.T) {
 			[]netip.Prefix{netip.MustParsePrefix("10.98.0.0/24"), netip.MustParsePrefix("fd00:99::/64")}, nil
 	}}
 
-	for _, a := range []string{"192.0.2.2", "10.98.0.1", "10.98.0.200", "fd00::1", "fd00:99::7", "::ffff:192.0.2.2"} {
+	for _, a := range []string{"192.0.2.2", addrGW98, "10.98.0.200", "fd00::1", "fd00:99::7", "::ffff:192.0.2.2"} {
 		is.True(l.contains(netip.MustParseAddr(a))) // a is local
 	}
 	for _, a := range []string{"192.0.2.3", "10.98.1.1", "203.0.113.5", "2001:db8::1", "fd00:98::1"} {
@@ -67,9 +72,9 @@ func TestLoadLocalAddrsFromDocker(t *testing.T) {
 	cli, ok := env.r.dockerCli.(*mockDockerClient)
 	is.True(ok)
 	cli.networks = []types.NetworkResource{
-		{Name: "bridge", Driver: "bridge", IPAM: network.IPAM{Config: []network.IPAMConfig{{Subnet: "172.17.0.0/16", Gateway: "172.17.0.1"}}}},
-		{Name: "app", Driver: "bridge", IPAM: network.IPAM{Config: []network.IPAMConfig{
-			{Subnet: "10.98.0.0/24", Gateway: "10.98.0.1"},
+		{Name: driverBridge, Driver: driverBridge, IPAM: network.IPAM{Config: []network.IPAMConfig{{Subnet: "172.17.0.0/16", Gateway: "172.17.0.1"}}}},
+		{Name: "app", Driver: driverBridge, IPAM: network.IPAM{Config: []network.IPAMConfig{
+			{Subnet: "10.98.0.0/24", Gateway: addrGW98},
 			{Subnet: "fd00:99::/64", Gateway: "fd00:99::1"},
 		}}},
 		// a macvlan network is a real LAN that rules may allow
@@ -88,7 +93,7 @@ func TestLoadLocalAddrsFromDocker(t *testing.T) {
 	for _, a := range []string{"192.0.2.2", "fe80::1", "198.51.100.7"} {
 		is.True(l.contains(netip.MustParseAddr(a))) // a is an address of the host
 	}
-	for _, a := range []string{"172.17.0.1", "10.98.0.1", "fd00:99::1"} {
+	for _, a := range []string{"172.17.0.1", addrGW98, "fd00:99::1"} {
 		is.True(l.contains(netip.MustParseAddr(a))) // a is the gateway of a Docker bridge network
 	}
 	for _, a := range []string{"172.17.5.5", "10.98.0.77", "fd00:99::abcd", "192.168.1.1", "192.168.1.50", "8.8.8.8", "172.18.0.1"} {

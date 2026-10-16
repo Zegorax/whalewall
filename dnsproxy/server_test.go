@@ -146,6 +146,8 @@ func acquireFree(t *testing.T, s *Server) netip.AddrPort {
 	return netip.AddrPort{}
 }
 
+const evilName = "evil.other.test."
+
 func matchSuffix(suffix string) func(string) bool {
 	return func(name string) bool {
 		return name == suffix || strings.HasSuffix(name, "."+suffix)
@@ -224,8 +226,8 @@ func TestAllowedAndDenied(t *testing.T) {
 	is := is.New(t)
 
 	up := newFakeUpstream(t, zoneHandler(t, map[string][]string{
-		zoneA:              {recA, recAAAA},
-		"evil.other.test.": {"evil.other.test. 60 IN A 10.0.0.9"},
+		zoneA:    {recA, recAAAA},
+		evilName: {"evil.other.test. 60 IN A 10.0.0.9"},
 	}))
 	s, addr := newServer(t, up, time.Second)
 

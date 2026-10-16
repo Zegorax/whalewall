@@ -8,6 +8,7 @@ import (
 )
 
 const (
+	domTLD     = "com"
 	domExample = "example.com"
 	domDeep    = "a.b.example.com"
 	domWild    = "*.example.com"
@@ -51,7 +52,7 @@ func TestParseDomainPattern(t *testing.T) {
 		{in: domDotted, wantErr: true},
 		{in: "a..example.com", wantErr: true},
 		{in: strings.Repeat("a", 64) + ".com", wantErr: true},
-		{in: strings.Repeat("a.", 130) + "com", wantErr: true},
+		{in: strings.Repeat("a.", 130) + domTLD, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.in, func(t *testing.T) {
@@ -81,7 +82,7 @@ func TestDomainMatching(t *testing.T) {
 		{
 			pattern: domExample,
 			match:   []string{domExample, "EXAMPLE.com.", "Example.Com"},
-			noMatch: []string{domSub, domEvil, "example.com.evil.net", "com", ""},
+			noMatch: []string{domSub, domEvil, "example.com.evil.net", domTLD, ""},
 		},
 		{
 			pattern: domWild,
@@ -91,7 +92,7 @@ func TestDomainMatching(t *testing.T) {
 		{
 			pattern: domNested,
 			match:   []string{domSub, domDeep, "a.b.c.d.e.example.com"},
-			noMatch: []string{domExample, domEvil, domDotted, "a.example.com.evil.net", "com"},
+			noMatch: []string{domExample, domEvil, domDotted, "a.example.com.evil.net", domTLD},
 		},
 	}
 	for _, tt := range tests {

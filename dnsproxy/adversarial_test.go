@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -82,7 +83,7 @@ func TestMalformedQuestions(t *testing.T) {
 	m.Id = dns.Id()
 	m.Question = []dns.Question{
 		{Name: zoneA, Qtype: dns.TypeA, Qclass: dns.ClassINET},
-		{Name: "evil.other.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET},
+		{Name: evilName, Qtype: dns.TypeA, Qclass: dns.ClassINET},
 	}
 	is.Equal(rawQuery(t, "udp", addr, m).Rcode, dns.RcodeFormatError)
 
@@ -134,7 +135,7 @@ func TestNamesThatOnlyLookAllowed(t *testing.T) {
 		m := new(dns.Msg)
 		m.Id = dns.Id()
 		m.Question = []dns.Question{{Name: name, Qtype: dns.TypeA, Qclass: dns.ClassINET}}
-		resp, _, err := (&dns.Client{Net: "udp", Timeout: 2 * time.Second}).Exchange(m, addr.String())
+		resp, _, err := (&dns.Client{Net: netUDP, Timeout: 2 * time.Second}).Exchange(m, addr.String())
 		if err != nil {
 			// a name the library refuses to pack can't be sent at all
 			continue
@@ -169,6 +170,7 @@ func TestGarbagePackets(t *testing.T) {
 		// label length beyond the packet
 		{0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0x3f, 'a', 'b'},
 	}
+	garbage = slices.Grow(garbage, 50)
 	for i := range 50 {
 		b := make([]byte, 1+i*7)
 		_, _ = rand.Read(b)
@@ -299,7 +301,7 @@ func TestMismatchedUpstreamAnswers(t *testing.T) {
 	up := newFakeUpstream(t, func(w dns.ResponseWriter, req *dns.Msg) {
 		resp := new(dns.Msg)
 		resp.SetReply(req)
-		resp.Question = []dns.Question{{Name: "evil.other.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+		resp.Question = []dns.Question{{Name: evilName, Qtype: dns.TypeA, Qclass: dns.ClassINET}}
 		resp.Answer = []dns.RR{rr(t, "evil.other.test. 60 IN A 10.6.6.6")}
 		_ = w.WriteMsg(resp)
 	})
