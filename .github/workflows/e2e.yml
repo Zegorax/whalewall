@@ -42,6 +42,12 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      # traffic between containers on a bridge is only seen by nftables
+      # with br_netfilter
+      - run: |
+          sudo modprobe br_netfilter
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
+
       - run: go test -race -count=1 ./dnsproxy/
 
       - run: |
