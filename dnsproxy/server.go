@@ -19,6 +19,11 @@ import (
 )
 
 const (
+	netUDP = "udp"
+	netTCP = "tcp"
+)
+
+const (
 	defaultMinTTL  = 30 * time.Second
 	defaultGrace   = 5 * time.Second
 	defaultTimeout = 3 * time.Second
@@ -169,7 +174,7 @@ func (s *Server) Acquire(addr netip.AddrPort) error {
 	}
 
 	l := &listener{refs: 1}
-	for _, network := range []string{"udp", "tcp"} {
+	for _, network := range []string{netUDP, netTCP} {
 		srv, err := s.startServer(addr, network)
 		if err != nil {
 			for _, started := range l.servers {
@@ -250,7 +255,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	if resp == nil {
 		return
 	}
-	if w.RemoteAddr().Network() == "udp" {
+	if w.RemoteAddr().Network() == netUDP {
 		size := dns.MinMsgSize
 		if opt := req.IsEdns0(); opt != nil {
 			size = int(opt.UDPSize())
@@ -365,9 +370,9 @@ func (s *Server) forward(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 		upReq := req.Copy()
 		upReq.Id = dns.Id()
 
-		resp, err := s.exchange(ctx, "udp", upstream, upReq)
+		resp, err := s.exchange(ctx, netUDP, upstream, upReq)
 		if err == nil && resp.Truncated {
-			resp, err = s.exchange(ctx, "tcp", upstream, upReq)
+			resp, err = s.exchange(ctx, netTCP, upstream, upReq)
 		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", upstream, err))

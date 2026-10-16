@@ -143,7 +143,7 @@ func FuzzDomainMatches(f *testing.F) {
 		}
 		// whatever matched must really be below one of the suffixes, as
 		// plain ASCII
-		for i := 0; i < len(name); i++ {
+		for i := range len(name) {
 			if name[i] > 0x7f {
 				t.Fatalf("non-ASCII name %q matched", name)
 			}

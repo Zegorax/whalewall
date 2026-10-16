@@ -133,11 +133,11 @@ func freeAddr(t *testing.T, ip string) netip.AddrPort {
 
 // acquireFree makes s listen on a free port of ip, retrying if another
 // test takes the port first.
-func acquireFree(t *testing.T, s *Server, ip string) netip.AddrPort {
+func acquireFree(t *testing.T, s *Server) netip.AddrPort {
 	t.Helper()
 	var err error
-	for i := 0; i < 50; i++ {
-		addr := freeAddr(t, ip)
+	for range 50 {
+		addr := freeAddr(t, "127.0.0.1")
 		if err = s.Acquire(addr); err == nil {
 			return addr
 		}
@@ -157,9 +157,9 @@ func query(t *testing.T, network string, srv netip.AddrPort, src string, name st
 	c := dns.Client{Net: network, Timeout: 2 * time.Second}
 	if src != "" {
 		switch network {
-		case "udp":
+		case netUDP:
 			c.Dialer = &net.Dialer{LocalAddr: &net.UDPAddr{IP: net.ParseIP(src)}}
-		case "tcp":
+		case netTCP:
 			c.Dialer = &net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(src)}}
 		}
 	}
@@ -183,7 +183,7 @@ func newServer(t *testing.T, up *fakeUpstream, minTTL time.Duration) (*Server, n
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := acquireFree(t, s, "127.0.0.1")
+	addr := acquireFree(t, s)
 	t.Cleanup(s.Close)
 
 	return s, addr
@@ -509,7 +509,7 @@ func TestUpstreamFailover(t *testing.T) {
 		Timeout:   time.Second,
 	})
 	is.NoErr(err)
-	addr := acquireFree(t, s, "127.0.0.1")
+	addr := acquireFree(t, s)
 	t.Cleanup(s.Close)
 	s.Register([]netip.Addr{netip.MustParseAddr("127.0.0.1")}, &Policy{
 		Name: clientName, Match: matchSuffix("corp.test"), Allow: (&recorder{}).allow,
@@ -530,7 +530,7 @@ func TestUpstreamDown(t *testing.T) {
 		Timeout:   300 * time.Millisecond,
 	})
 	is.NoErr(err)
-	addr := acquireFree(t, s, "127.0.0.1")
+	addr := acquireFree(t, s)
 	t.Cleanup(s.Close)
 	s.Register([]netip.Addr{netip.MustParseAddr("127.0.0.1")}, &Policy{
 		Name: clientName, Match: matchSuffix("corp.test"), Allow: (&recorder{}).allow,

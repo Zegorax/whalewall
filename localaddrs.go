@@ -111,5 +111,4 @@ func (r *RuleManager) loadLocalAddrs(ctx context.Context) ([]netip.Addr, []netip
 	}
 
 	return addrs, nil, nil
-
 }

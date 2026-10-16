@@ -169,7 +169,7 @@ func TestGarbagePackets(t *testing.T) {
 		// label length beyond the packet
 		{0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0x3f, 'a', 'b'},
 	}
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		b := make([]byte, 1+i*7)
 		_, _ = rand.Read(b)
 		garbage = append(garbage, b)
@@ -216,7 +216,7 @@ func TestTTLIsCapped(t *testing.T) {
 		Timeout:   time.Second,
 	})
 	is.NoErr(err)
-	addr := acquireFree(t, s, srcLoopback)
+	addr := acquireFree(t, s)
 	t.Cleanup(s.Close)
 
 	rec := &recorder{}
@@ -238,8 +238,8 @@ func TestAddressCountIsCapped(t *testing.T) {
 	t.Parallel()
 	is := is.New(t)
 
-	var rrs []string
-	for i := 0; i < 300; i++ {
+	rrs := make([]string, 0, 300)
+	for i := range 300 {
 		rrs = append(rrs, fmt.Sprintf("%s 60 IN A 10.9.%d.%d", zoneA, i/250, i%250+1))
 	}
 	up := newFakeUpstream(t, zoneHandler(t, map[string][]string{zoneA: rrs}))
@@ -376,7 +376,7 @@ func TestConcurrentQueries(t *testing.T) {
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 400)
-	for i := 0; i < 400; i++ {
+	for i := range 400 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -424,8 +424,8 @@ func TestSlowTCPClientDoesNotBlockOthers(t *testing.T) {
 	registerLoopback(s, &Policy{Name: clientName, Match: matchSuffix(policyZone), Allow: (&recorder{}).allow})
 
 	// connections that send half a message and then nothing
-	var slow []net.Conn
-	for i := 0; i < 50; i++ {
+	slow := make([]net.Conn, 0, 50)
+	for range 50 {
 		c, err := net.Dial("tcp", addr.String())
 		is.NoErr(err)
 		_, _ = c.Write([]byte{0, 40, 1})
@@ -448,8 +448,8 @@ func TestLargeAnswerIsTruncatedOverUDP(t *testing.T) {
 	t.Parallel()
 	is := is.New(t)
 
-	var rrs []string
-	for i := 0; i < 60; i++ {
+	rrs := make([]string, 0, 60)
+	for i := range 60 {
 		rrs = append(rrs, fmt.Sprintf("%s 60 IN A 10.9.0.%d", zoneA, i+1))
 	}
 	up := newFakeUpstream(t, zoneHandler(t, map[string][]string{zoneA: rrs}))

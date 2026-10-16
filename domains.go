@@ -187,7 +187,7 @@ func plainName(name string) bool {
 	if name == "" || name[0] == '.' || name[len(name)-1] == '.' {
 		return false
 	}
-	for i := 0; i < len(name); i++ {
+	for i := range len(name) {
 		c := name[i]
 		if c <= ' ' || c >= 0x7f {
 			return false
@@ -203,7 +203,7 @@ func plainName(name string) bool {
 // some non-ASCII characters to ASCII ones (the Kelvin sign U+212A becomes
 // "k"), which would make a different name match a pattern.
 func asciiLower(s string) string {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if c := s[i]; 'A' <= c && c <= 'Z' {
 			b := []byte(s)
 			for j := i; j < len(b); j++ {
