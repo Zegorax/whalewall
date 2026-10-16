@@ -343,9 +343,3 @@ func (r *RuleManager) ensureIPv6BaseRules() error {
 
 	return nil
 }
-
-func (r *RuleManager) ipv6Managed() bool {
-	r.ipv6Mtx.Lock()
-	defer r.ipv6Mtx.Unlock()
-	return r.ipv6Ready
-}

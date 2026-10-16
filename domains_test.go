@@ -7,6 +7,16 @@ import (
 	"github.com/matryer/is"
 )
 
+const (
+	domExample = "example.com"
+	domDeep    = "a.b.example.com"
+	domWild    = "*.example.com"
+	domNested  = "**.example.com"
+	domDotted  = ".example.com"
+	domSub     = "a.example.com"
+	domEvil    = "evilexample.com"
+)
+
 func TestParseDomainPattern(t *testing.T) {
 	t.Parallel()
 
@@ -16,12 +26,12 @@ func TestParseDomainPattern(t *testing.T) {
 		kind    domainKind
 		wantErr bool
 	}{
-		{in: "example.com", want: "example.com", kind: domainExact},
-		{in: "Example.COM.", want: "example.com", kind: domainExact},
-		{in: "a.b.example.com", want: "a.b.example.com", kind: domainExact},
-		{in: "*.example.com", want: "*.example.com", kind: domainWildcard},
-		{in: "**.example.com", want: "**.example.com", kind: domainNested},
-		{in: "*.Example.com.", want: "*.example.com", kind: domainWildcard},
+		{in: domExample, want: domExample, kind: domainExact},
+		{in: "Example.COM.", want: domExample, kind: domainExact},
+		{in: domDeep, want: domDeep, kind: domainExact},
+		{in: domWild, want: domWild, kind: domainWildcard},
+		{in: domNested, want: domNested, kind: domainNested},
+		{in: "*.Example.com.", want: domWild, kind: domainWildcard},
 		{in: "bücher.example", want: "xn--bcher-kva.example", kind: domainExact},
 		{in: "*.bücher.example", want: "*.xn--bcher-kva.example", kind: domainWildcard},
 		{in: "localhost", want: "localhost", kind: domainExact},
@@ -38,7 +48,7 @@ func TestParseDomainPattern(t *testing.T) {
 		{in: "a*.example.com", wantErr: true},
 		{in: "*.*.example.com", wantErr: true},
 		{in: "**.*.example.com", wantErr: true},
-		{in: ".example.com", wantErr: true},
+		{in: domDotted, wantErr: true},
 		{in: "a..example.com", wantErr: true},
 		{in: strings.Repeat("a", 64) + ".com", wantErr: true},
 		{in: strings.Repeat("a.", 130) + "com", wantErr: true},
@@ -69,19 +79,19 @@ func TestDomainMatching(t *testing.T) {
 		noMatch []string
 	}{
 		{
-			pattern: "example.com",
-			match:   []string{"example.com", "EXAMPLE.com.", "Example.Com"},
-			noMatch: []string{"a.example.com", "evilexample.com", "example.com.evil.net", "com", ""},
+			pattern: domExample,
+			match:   []string{domExample, "EXAMPLE.com.", "Example.Com"},
+			noMatch: []string{domSub, domEvil, "example.com.evil.net", "com", ""},
 		},
 		{
-			pattern: "*.example.com",
-			match:   []string{"a.example.com", "A.Example.com.", "x-y.example.com"},
-			noMatch: []string{"example.com", "a.b.example.com", "evilexample.com", ".example.com", "a.example.com.evil.net", "aexample.com"},
+			pattern: domWild,
+			match:   []string{domSub, "A.Example.com.", "x-y.example.com"},
+			noMatch: []string{domExample, domDeep, domEvil, domDotted, "a.example.com.evil.net", "aexample.com"},
 		},
 		{
-			pattern: "**.example.com",
-			match:   []string{"a.example.com", "a.b.example.com", "a.b.c.d.e.example.com"},
-			noMatch: []string{"example.com", "evilexample.com", ".example.com", "a.example.com.evil.net", "com"},
+			pattern: domNested,
+			match:   []string{domSub, domDeep, "a.b.c.d.e.example.com"},
+			noMatch: []string{domExample, domEvil, domDotted, "a.example.com.evil.net", "com"},
 		},
 	}
 	for _, tt := range tests {
@@ -106,15 +116,15 @@ func TestDomainsListMixed(t *testing.T) {
 	t.Parallel()
 	is := is.New(t)
 
-	var list domainsList
-	for _, s := range []string{"example.com", "**.example.com", "*.other.net"} {
+	list := make(domainsList, 0, 3)
+	for _, s := range []string{domExample, domNested, "*.other.net"} {
 		p, err := parseDomainPattern(s)
 		is.NoErr(err)
 		list = append(list, p)
 	}
 
-	is.True(list.matches("example.com"))
-	is.True(list.matches("a.b.example.com"))
+	is.True(list.matches(domExample))
+	is.True(list.matches(domDeep))
 	is.True(list.matches("a.other.net"))
 	is.True(!list.matches("a.b.other.net"))
 	is.True(!list.matches("other.net"))
@@ -124,7 +134,7 @@ func TestDomainPatternRoundTrip(t *testing.T) {
 	t.Parallel()
 	is := is.New(t)
 
-	for _, s := range []string{"example.com", "*.example.com", "**.example.com"} {
+	for _, s := range []string{domExample, domWild, domNested} {
 		p, err := parseDomainPattern(s)
 		is.NoErr(err)
 		b, err := p.MarshalBinary()

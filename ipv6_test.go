@@ -24,6 +24,17 @@ import (
 	"github.com/capnspacehook/whalewall/dnsproxy"
 )
 
+const (
+	enabledTrue = "true"
+	netDefault  = "default"
+	dummyDNS    = "192.0.2.53"
+	allowHTTPS  = `
+output:
+  - proto: tcp
+    dst_ports:
+      - 443`
+)
+
 var (
 	gatewayAddr6 = netip.MustParseAddr("fd00:1::1")
 	cont1Addr6   = netip.MustParseAddr("fd00:1::2")
@@ -153,7 +164,7 @@ func (e *ipv6TestEnv) refresh() {
 }
 
 func dualStackContainer(id, name string, labels map[string]string, dnsServers []string) types.ContainerJSON {
-	labels[enabledLabel] = "true"
+	labels[enabledLabel] = enabledTrue
 	return types.ContainerJSON{
 		ContainerJSONBase: &types.ContainerJSONBase{
 			ID:         id,
@@ -163,7 +174,7 @@ func dualStackContainer(id, name string, labels map[string]string, dnsServers []
 		Config: &container.Config{Labels: labels},
 		NetworkSettings: &types.NetworkSettings{
 			Networks: map[string]*network.EndpointSettings{
-				"default": {
+				netDefault: {
 					Gateway:           gatewayAddr.String(),
 					IPAddress:         cont1Addr.String(),
 					IPv6Gateway:       gatewayAddr6.String(),
@@ -373,11 +384,7 @@ func TestIPv6OnlyContainer(t *testing.T) {
 	is := env.is
 
 	c := dualStackContainer(cont1ID, cont1Name, map[string]string{
-		rulesLabel: `
-output:
-  - proto: tcp
-    dst_ports:
-      - 443`,
+		rulesLabel: allowHTTPS,
 	}, nil)
 	ep := c.NetworkSettings.Networks["default"]
 	ep.IPAddress = ""
@@ -447,7 +454,7 @@ output:
       - 1.1.1.1
     dst_ports:
       - 80`,
-	}, []string{"192.0.2.53"})
+	}, []string{dummyDNS})
 	is.NoErr(env.r.createContainerRules(context.Background(), c, true))
 
 	env.refresh()
@@ -647,16 +654,16 @@ output:
 		dnsServers []string
 		rules      string
 	}{
-		{name: "dns flag disabled", dnsEnabled: false, dnsServers: []string{"192.0.2.53"}, rules: domainRules},
+		{name: "dns flag disabled", dnsEnabled: false, dnsServers: []string{dummyDNS}, rules: domainRules},
 		{name: "no dns option", dnsEnabled: true, rules: domainRules},
-		{name: "invalid wildcard", dnsEnabled: true, dnsServers: []string{"192.0.2.53"}, rules: `
+		{name: "invalid wildcard", dnsEnabled: true, dnsServers: []string{dummyDNS}, rules: `
 output:
   - domains:
       - a.*.example.com
     proto: tcp
     dst_ports:
       - 443`},
-		{name: "domains and ips", dnsEnabled: true, dnsServers: []string{"192.0.2.53"}, rules: `
+		{name: "domains and ips", dnsEnabled: true, dnsServers: []string{dummyDNS}, rules: `
 output:
   - domains:
       - api.example.com
@@ -665,7 +672,7 @@ output:
     proto: tcp
     dst_ports:
       - 443`},
-		{name: "unknown key", dnsEnabled: true, dnsServers: []string{"192.0.2.53"}, rules: `
+		{name: "unknown key", dnsEnabled: true, dnsServers: []string{dummyDNS}, rules: `
 output:
   - domain: api.example.com`},
 	}
@@ -705,11 +712,7 @@ func TestDomainSetsAreNotCreatedForOtherRules(t *testing.T) {
 	env := newIPv6TestEnv(t, false, true)
 	is := env.is
 
-	c := dualStackContainer(cont1ID, cont1Name, map[string]string{rulesLabel: `
-output:
-  - proto: tcp
-    dst_ports:
-      - 443`}, nil)
+	c := dualStackContainer(cont1ID, cont1Name, map[string]string{rulesLabel: allowHTTPS}, nil)
 	ep := c.NetworkSettings.Networks["default"]
 	ep.GlobalIPv6Address = ""
 	ep.IPv6Gateway = ""
@@ -736,7 +739,7 @@ output:
       - api.example.com
     proto: tcp
     dst_ports:
-      - 443`}, []string{"192.0.2.53"})
+      - 443`}, []string{dummyDNS})
 	ep := c.NetworkSettings.Networks["default"]
 	ep.GlobalIPv6Address = ""
 	ep.IPv6Gateway = ""

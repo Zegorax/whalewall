@@ -490,7 +490,8 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 // solicitation and advertisement, and redirect) and packet too big.
 func createICMPv6Rules(chain *nftables.Chain, id string) []*nftables.Rule {
 	newRule := func(exprs ...expr.Any) *nftables.Rule {
-		base := []expr.Any{
+		base := make([]expr.Any, 0, 5+len(exprs))
+		base = append(base,
 			// [ meta load l4proto => reg 1 ]
 			&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
 			// [ cmp eq reg 1 ... ]
@@ -503,7 +504,7 @@ func createICMPv6Rules(chain *nftables.Chain, id string) []*nftables.Rule {
 				Offset:        0,
 				DestRegister:  1,
 			},
-		}
+		)
 		base = append(base, exprs...)
 		base = append(base, &expr.Counter{}, acceptVerdict)
 		return &nftables.Rule{
@@ -1616,8 +1617,10 @@ func compareAddrExpr(addr []byte) expr.Any {
 }
 
 func matchAddrRangeExprs(lowAddr, highAddr netip.Addr, offset uint32) []expr.Any {
-	exprs := []expr.Any{getAddrExprN(offset, uint32(len(addrBytes(lowAddr))))}
-	return append(exprs, compareAddrRangeExprs(addrBytes(lowAddr), addrBytes(highAddr))...)
+	return append(
+		[]expr.Any{getAddrExprN(offset, uint32(len(addrBytes(lowAddr))))},
+		compareAddrRangeExprs(addrBytes(lowAddr), addrBytes(highAddr))...,
+	)
 }
 
 func compareAddrRangeExprs(lowAddr, highAddr []byte) []expr.Any {
@@ -1681,9 +1684,7 @@ func comparePortExpr(port uint16) expr.Any {
 }
 
 func matchPortsExprs(ports portInterval, offset uint32) []expr.Any {
-	exprs := []expr.Any{getPortExpr(offset)}
-	exprs = append(exprs, comparePortsExprs(ports)...)
-	return exprs
+	return append([]expr.Any{getPortExpr(offset)}, comparePortsExprs(ports)...)
 }
 
 func comparePortsExprs(ports portInterval) []expr.Any {

@@ -16,6 +16,13 @@ import (
 	"go.uber.org/zap/zaptest"
 )
 
+const (
+	zoneA      = "a.corp.test."
+	clientName = "client"
+	recA       = "a.corp.test. 60 IN A 10.0.0.1"
+	recAAAA    = "a.corp.test. 60 IN AAAA fd00::1"
+)
+
 // fakeUpstream is an authoritative DNS server for tests.
 type fakeUpstream struct {
 	addr    string
@@ -177,14 +184,14 @@ func TestAllowedAndDenied(t *testing.T) {
 	is := is.New(t)
 
 	up := newFakeUpstream(t, zoneHandler(t, map[string][]string{
-		"a.corp.test.":     {"a.corp.test. 60 IN A 10.0.0.1", "a.corp.test. 60 IN AAAA fd00::1"},
+		zoneA:              {recA, recAAAA},
 		"evil.other.test.": {"evil.other.test. 60 IN A 10.0.0.9"},
 	}))
 	s, addr := newServer(t, up, time.Second)
 
 	rec := &recorder{}
 	s.Register([]netip.Addr{netip.MustParseAddr("127.0.0.1")}, &Policy{
-		Name:    "client",
+		Name:    clientName,
 		Match:   matchSuffix("corp.test"),
 		HasIPv6: true,
 		Allow:   rec.allow,
@@ -227,13 +234,13 @@ func TestUnknownSourceRefused(t *testing.T) {
 	is := is.New(t)
 
 	up := newFakeUpstream(t, zoneHandler(t, map[string][]string{
-		"a.corp.test.": {"a.corp.test. 60 IN A 10.0.0.1"},
+		zoneA: {recA},
 	}))
 	s, addr := newServer(t, up, time.Second)
 
 	rec := &recorder{}
 	s.Register([]netip.Addr{netip.MustParseAddr("127.0.0.2")}, &Policy{
-		Name: "client", Match: matchSuffix("corp.test"), Allow: rec.allow,
+		Name: clientName, Match: matchSuffix("corp.test"), Allow: rec.allow,
 	})
 
 	resp := query(t, "udp", addr, "127.0.0.1", "a.corp.test", dns.TypeA)
@@ -294,7 +301,7 @@ func TestCNAMEChain(t *testing.T) {
 
 	rec := &recorder{}
 	s.Register([]netip.Addr{netip.MustParseAddr("127.0.0.1")}, &Policy{
-		Name: "client", Match: matchSuffix("corp.test"), Allow: rec.allow,
+		Name: clientName, Match: matchSuffix("corp.test"), Allow: rec.allow,
 	})
 
 	resp := query(t, "udp", addr, "", "alias.corp.test", dns.TypeA)
@@ -314,7 +321,7 @@ func TestMinTTLAndUnsafeAddresses(t *testing.T) {
 	is := is.New(t)
 
 	up := newFakeUpstream(t, zoneHandler(t, map[string][]string{
-		"a.corp.test.": {
+		zoneA: {
 			"a.corp.test. 0 IN A 10.0.0.1",
 			"a.corp.test. 60 IN A 127.0.0.1",
 			"a.corp.test. 60 IN A 169.254.169.254",
@@ -326,7 +333,7 @@ func TestMinTTLAndUnsafeAddresses(t *testing.T) {
 
 	rec := &recorder{}
 	s.Register([]netip.Addr{netip.MustParseAddr("127.0.0.1")}, &Policy{
-		Name: "client", Match: matchSuffix("corp.test"), Allow: rec.allow,
+		Name: clientName, Match: matchSuffix("corp.test"), Allow: rec.allow,
 	})
 
 	resp := query(t, "udp", addr, "", "a.corp.test", dns.TypeA)
@@ -347,13 +354,13 @@ func TestAAAAWithoutIPv6(t *testing.T) {
 	is := is.New(t)
 
 	up := newFakeUpstream(t, zoneHandler(t, map[string][]string{
-		"a.corp.test.": {"a.corp.test. 60 IN AAAA fd00::1"},
+		zoneA: {recAAAA},
 	}))
 	s, addr := newServer(t, up, time.Second)
 
 	rec := &recorder{}
 	s.Register([]netip.Addr{netip.MustParseAddr("127.0.0.1")}, &Policy{
-		Name: "client", Match: matchSuffix("corp.test"), HasIPv6: false, Allow: rec.allow,
+		Name: clientName, Match: matchSuffix("corp.test"), HasIPv6: false, Allow: rec.allow,
 	})
 
 	resp := query(t, "udp", addr, "", "a.corp.test", dns.TypeAAAA)
@@ -368,13 +375,13 @@ func TestAllowFailureFailsQuery(t *testing.T) {
 	is := is.New(t)
 
 	up := newFakeUpstream(t, zoneHandler(t, map[string][]string{
-		"a.corp.test.": {"a.corp.test. 60 IN A 10.0.0.1"},
+		zoneA: {recA},
 	}))
 	s, addr := newServer(t, up, time.Second)
 
 	rec := &recorder{err: errors.New("nftables unavailable")}
 	s.Register([]netip.Addr{netip.MustParseAddr("127.0.0.1")}, &Policy{
-		Name: "client", Match: matchSuffix("corp.test"), Allow: rec.allow,
+		Name: clientName, Match: matchSuffix("corp.test"), Allow: rec.allow,
 	})
 
 	resp := query(t, "udp", addr, "", "a.corp.test", dns.TypeA)
@@ -387,7 +394,7 @@ func TestAllowCalledBeforeReply(t *testing.T) {
 	is := is.New(t)
 
 	up := newFakeUpstream(t, zoneHandler(t, map[string][]string{
-		"a.corp.test.": {"a.corp.test. 60 IN A 10.0.0.1"},
+		zoneA: {recA},
 	}))
 	s, addr := newServer(t, up, time.Second)
 
@@ -428,7 +435,7 @@ func TestTruncatedUDPRetriesOverTCP(t *testing.T) {
 		if _, isUDP := w.RemoteAddr().(*net.UDPAddr); isUDP {
 			resp.Truncated = true
 		} else {
-			resp.Answer = append(resp.Answer, rr(t, "a.corp.test. 60 IN A 10.0.0.1"))
+			resp.Answer = append(resp.Answer, rr(t, recA))
 		}
 		_ = w.WriteMsg(resp)
 	})
@@ -436,7 +443,7 @@ func TestTruncatedUDPRetriesOverTCP(t *testing.T) {
 
 	rec := &recorder{}
 	s.Register([]netip.Addr{netip.MustParseAddr("127.0.0.1")}, &Policy{
-		Name: "client", Match: matchSuffix("corp.test"), Allow: rec.allow,
+		Name: clientName, Match: matchSuffix("corp.test"), Allow: rec.allow,
 	})
 
 	resp := query(t, "udp", addr, "", "a.corp.test", dns.TypeA)
@@ -455,7 +462,7 @@ func TestUpstreamFailover(t *testing.T) {
 		_ = w.WriteMsg(resp)
 	})
 	good := newFakeUpstream(t, zoneHandler(t, map[string][]string{
-		"a.corp.test.": {"a.corp.test. 60 IN A 10.0.0.1"},
+		zoneA: {recA},
 	}))
 	s, err := New(zaptest.NewLogger(t), Config{
 		Upstreams: []string{bad.addr, good.addr},
@@ -466,7 +473,7 @@ func TestUpstreamFailover(t *testing.T) {
 	is.NoErr(s.Acquire(addr))
 	t.Cleanup(s.Close)
 	s.Register([]netip.Addr{netip.MustParseAddr("127.0.0.1")}, &Policy{
-		Name: "client", Match: matchSuffix("corp.test"), Allow: (&recorder{}).allow,
+		Name: clientName, Match: matchSuffix("corp.test"), Allow: (&recorder{}).allow,
 	})
 
 	resp := query(t, "udp", addr, "", "a.corp.test", dns.TypeA)
@@ -488,7 +495,7 @@ func TestUpstreamDown(t *testing.T) {
 	is.NoErr(s.Acquire(addr))
 	t.Cleanup(s.Close)
 	s.Register([]netip.Addr{netip.MustParseAddr("127.0.0.1")}, &Policy{
-		Name: "client", Match: matchSuffix("corp.test"), Allow: (&recorder{}).allow,
+		Name: clientName, Match: matchSuffix("corp.test"), Allow: (&recorder{}).allow,
 	})
 
 	resp := query(t, "udp", addr, "", "a.corp.test", dns.TypeA)
@@ -511,7 +518,7 @@ func TestListenerRefcount(t *testing.T) {
 	// still listening after the first release
 	c := dns.Client{Net: "tcp", Timeout: time.Second}
 	m := new(dns.Msg)
-	m.SetQuestion("a.corp.test.", dns.TypeA)
+	m.SetQuestion(zoneA, dns.TypeA)
 	_, _, err = c.Exchange(m, addr.String())
 	is.NoErr(err)
 
@@ -525,7 +532,7 @@ func TestIPv6Listener(t *testing.T) {
 	is := is.New(t)
 
 	up := newFakeUpstream(t, zoneHandler(t, map[string][]string{
-		"a.corp.test.": {"a.corp.test. 60 IN AAAA fd00::1"},
+		zoneA: {recAAAA},
 	}))
 	s, err := New(zaptest.NewLogger(t), Config{Upstreams: []string{up.addr}, Timeout: time.Second})
 	is.NoErr(err)

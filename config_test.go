@@ -8,6 +8,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const errMutuallyExclusive = "mutually exclusive"
+
 func TestConfigDomains(t *testing.T) {
 	t.Parallel()
 
@@ -58,7 +60,7 @@ output:
     ips: [1.1.1.1]
     proto: tcp
     dst_ports: [443]`,
-			wantErr: "mutually exclusive",
+			wantErr: errMutuallyExclusive,
 		},
 		{
 			name: "domains and container",
@@ -69,7 +71,7 @@ output:
     container: other
     proto: tcp
     dst_ports: [443]`,
-			wantErr: "mutually exclusive",
+			wantErr: errMutuallyExclusive,
 		},
 		{
 			name: "domains and network",
@@ -79,7 +81,7 @@ output:
     network: default
     proto: tcp
     dst_ports: [443]`,
-			wantErr: "mutually exclusive",
+			wantErr: errMutuallyExclusive,
 		},
 		{
 			name: "domains without proto",
