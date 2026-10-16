@@ -162,3 +162,17 @@ Phase 0 decides. If dockerd and nft work in this sandbox, scenarios and screensh
 - google/nftables v0.2.0 may lack some set-timeout, NAT or ICMPv6 expression support; fallback is a dependency bump.
 - NAT66 availability depends on host kernel modules.
 - Seccomp allowlist growth widens the sandbox slightly; syscalls are argument-constrained where possible.
+
+## 9. Implementation notes (what changed from the plan)
+
+Verified in Phase 0 and during implementation:
+
+- **Docker's embedded resolver is not always attributable.** On Docker 29 the embedded resolver (127.0.0.11) forwards from the host's network namespace when the container uses the host's DNS servers, so its queries never cross the bridge and can't be redirected per container. With custom `dns:` servers it forwards from the container's namespace, where the redirect works. Domain rules therefore require the container to set the `dns` option (any address). Without it whalewall logs an error and drops all of the container's traffic.
+- **Fail closed for invalid rules.** Parse and validation errors (including `-dns` missing or the `dns` option missing) now leave the container fully isolated by the drop chain, instead of leaving it unmanaged. This also applies to rules that were invalid before this feature.
+- **IPv6 without Docker's IPv6 chains.** If a managed container has an IPv6 address and the `ip6` base rules can't be created, whalewall creates no rules for it and logs an error; it can't drop IPv6 traffic without the `DOCKER-USER` hook. The e2e scenario checks that message.
+- **mapped_ports is IPv4 only**; IPv6 port mappings are not handled (documented in the README).
+- **0x20 case randomization** was dropped from the resolver; random IDs and source ports are used.
+- **Answers are sanitized**: only the CNAME chain of the question is kept, and loopback, link-local, multicast and unspecified addresses are removed.
+- **Established connections** survive set expiry: domain rules only require a set match for new connections.
+- **seccomp**: added `listen`, `accept4`, `recvfrom`, `sendto`, `getrandom`, `unlink`, socket options and bind sizes for the resolver, plus the `MAP_DROPPABLE` mmap used by Go's vDSO getrandom.
+- **Evidence**: the sandbox kernel has no IPv6, so IPv6 scenarios (13, 18 and the IPv6 parts of others) are skipped locally and run in `.github/workflows/e2e.yml`, which commits the rendered evidence to the branch.
