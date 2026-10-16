@@ -24,6 +24,10 @@ const (
 	defaultTimeout = 3 * time.Second
 	startTimeout   = 3 * time.Second
 	maxCNAMEChain  = 16
+	defaultMaxTTL  = time.Hour
+	// maxAddrsPerAnswer limits how many addresses a single answer can
+	// open, an upstream controlled by an attacker could return thousands
+	maxAddrsPerAnswer = 64
 )
 
 // Resolved is an address that was returned for an allowed name.
@@ -44,6 +48,10 @@ type Policy struct {
 	// HasIPv6 is true if the container has an IPv6 address. If it
 	// doesn't AAAA queries are answered with an empty answer.
 	HasIPv6 bool
+	// Reject reports addresses that must never be allowed even if an
+	// allowed name resolves to them, such as the host's addresses on the
+	// container's networks. May be nil.
+	Reject func(addr netip.Addr) bool
 	// Allow is called with the queried name and the addresses of an allowed answer before
 	// the answer is returned. If it returns an error the query fails.
 	Allow func(ctx context.Context, name string, addrs []Resolved) error
@@ -57,6 +65,9 @@ type Config struct {
 	MinTTL time.Duration
 	// Grace is added to the TTL of every address.
 	Grace time.Duration
+	// MaxTTL is the maximum time an address stays allowed, no matter how
+	// large the TTL of the record is.
+	MaxTTL time.Duration
 	// Timeout is the timeout of a single upstream exchange.
 	Timeout time.Duration
 }
@@ -88,6 +99,10 @@ func New(logger *zap.Logger, cfg Config) (*Server, error) {
 	if cfg.Grace == 0 {
 		cfg.Grace = defaultGrace
 	}
+	if cfg.MaxTTL == 0 {
+		cfg.MaxTTL = defaultMaxTTL
+	}
+	cfg.MaxTTL = max(cfg.MaxTTL, cfg.MinTTL)
 	if cfg.Timeout == 0 {
 		cfg.Timeout = defaultTimeout
 	}
@@ -279,12 +294,27 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 	}
 
 	q := req.Question[0]
-	name := strings.ToLower(strings.TrimSuffix(q.Name, "."))
+	name := asciiLower(strings.TrimSuffix(q.Name, "."))
 	logger := s.logger.With(
 		zap.String("container.name", p.Name),
 		zap.String("dns.name", name),
 		zap.String("dns.type", dns.TypeToString[q.Qtype]),
 	)
+
+	// only plain internet class lookups of single records are allowed;
+	// zone transfers and ANY queries would reveal more than the names a
+	// container is allowed to resolve
+	if q.Qclass != dns.ClassINET || q.Qtype == dns.TypeAXFR || q.Qtype == dns.TypeIXFR || q.Qtype == dns.TypeANY {
+		logger.Warn("refusing unsupported DNS query", zap.String("dns.class", dns.ClassToString[q.Qclass]))
+		return reply(req, dns.RcodeRefused)
+	}
+	// names are matched as ASCII, anything else (the library escapes
+	// non-printable bytes and dots inside labels with a backslash) is not
+	// a name that could have been allowed
+	if strings.ContainsRune(name, '\\') {
+		logger.Warn("denied DNS query with escaped characters")
+		return reply(req, dns.RcodeNameError)
+	}
 
 	if !p.Match(name) {
 		logger.Warn("denied DNS query")
@@ -307,7 +337,7 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 		return upstreamResp
 	}
 
-	resolved := s.filterAnswer(upstreamResp, q.Name)
+	resolved := s.filterAnswer(upstreamResp, q.Name, p.Reject)
 	if len(resolved) != 0 {
 		if err := p.Allow(ctx, name, resolved); err != nil {
 			logger.Error("error allowing addresses", zap.Error(err))
@@ -372,7 +402,7 @@ func (s *Server) exchange(ctx context.Context, network, upstream string, req *dn
 // removed from the answer and so are addresses that must never be
 // reachable through DNS (loopback, link-local, ...), preventing a
 // permitted name from pointing a container at the host.
-func (s *Server) filterAnswer(resp *dns.Msg, qname string) []Resolved {
+func (s *Server) filterAnswer(resp *dns.Msg, qname string, reject func(netip.Addr) bool) []Resolved {
 	owners := map[string]bool{strings.ToLower(qname): true}
 	// follow CNAMEs; the answer is usually ordered but don't rely on it
 	for range maxCNAMEChain {
@@ -417,14 +447,19 @@ func (s *Server) filterAnswer(resp *dns.Msg, qname string) []Resolved {
 			continue
 		}
 		addr = addr.Unmap()
-		if addr.IsLoopback() || addr.IsUnspecified() || addr.IsMulticast() || addr.IsLinkLocalUnicast() {
+		if addr.IsLoopback() || addr.IsUnspecified() || addr.IsMulticast() || addr.IsLinkLocalUnicast() || (reject != nil && reject(addr)) {
 			s.logger.Warn("dropping unsafe address from DNS answer", zap.Stringer("addr", addr), zap.String("dns.name", qname))
+			continue
+		}
+		if len(resolved) >= maxAddrsPerAnswer {
+			s.logger.Warn("dropping addresses over the limit from DNS answer", zap.String("dns.name", qname))
 			continue
 		}
 
 		answer = append(answer, rr)
 		ttl := time.Duration(rr.Header().Ttl) * time.Second
-		resolved = append(resolved, Resolved{Addr: addr, TTL: max(ttl, s.cfg.MinTTL) + s.cfg.Grace})
+		ttl = min(max(ttl, s.cfg.MinTTL), s.cfg.MaxTTL)
+		resolved = append(resolved, Resolved{Addr: addr, TTL: ttl + s.cfg.Grace})
 	}
 	resp.Answer = answer
 	// additional records may carry unrelated addresses
@@ -443,4 +478,16 @@ func filterExtra(extra []dns.RR) []dns.RR {
 	}
 
 	return kept
+}
+
+// asciiLower lower-cases ASCII letters only; see the matcher in the
+// whalewall package for why strings.ToLower is not used.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }

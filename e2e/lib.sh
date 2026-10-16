@@ -4,6 +4,7 @@
 
 IMG=${E2E_IMAGE:-ghcr.io/capnspacehook/eavesdropper}
 NET=e2enet
+NET2=e2enet2
 SUBNET4=10.99.0.0/24
 GW4=10.99.0.1
 SUBNET6=fd00:99::/64
@@ -141,7 +142,7 @@ start_count() {
 ww_start() {
 	local flags=("$@")
 	if [ "${#flags[@]}" = 0 ]; then
-		flags=(-dns -dns-upstream 127.0.0.1:5300 -dns-min-ttl 1s -dns-grace 1s)
+		flags=(-dns -dns-upstream 127.0.0.1:5300 -dns-min-ttl 1s -dns-max-ttl 20s -dns-grace 1s)
 	fi
 	local started
 	started=$(start_count)

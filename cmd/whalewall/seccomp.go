@@ -344,6 +344,12 @@ var allowedSyscalls = seccomp.SyscallRules{
 			seccomp.EqualTo(unix.SOCK_RAW | unix.SOCK_NONBLOCK | unix.SOCK_CLOEXEC),
 			seccomp.EqualTo(unix.NETLINK_NETFILTER),
 		},
+		// listing the host's addresses, see (*RuleManager).loadLocalAddrs
+		{
+			seccomp.EqualTo(unix.AF_NETLINK),
+			seccomp.EqualTo(unix.SOCK_RAW | unix.SOCK_CLOEXEC),
+			seccomp.EqualTo(unix.NETLINK_ROUTE),
+		},
 	},
 	unix.SYS_STAT: {},
 	unix.SYS_TGKILL: {

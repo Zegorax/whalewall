@@ -13,6 +13,7 @@ import (
 
 	"github.com/matryer/is"
 	"github.com/miekg/dns"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -32,14 +33,28 @@ type fakeUpstream struct {
 func newFakeUpstream(t *testing.T, handler func(w dns.ResponseWriter, req *dns.Msg)) *fakeUpstream {
 	t.Helper()
 
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := pc.LocalAddr().String()
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
+	// the UDP and TCP port must be the same; another test may take the
+	// TCP port between the two calls, so retry
+	var (
+		pc   net.PacketConn
+		ln   net.Listener
+		addr string
+	)
+	for i := 0; ; i++ {
+		var err error
+		pc, err = net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr = pc.LocalAddr().String()
+		ln, err = net.Listen("tcp", addr)
+		if err == nil {
+			break
+		}
+		_ = pc.Close()
+		if i > 50 {
+			t.Fatal(err)
+		}
 	}
 
 	f := &fakeUpstream{addr: addr}
@@ -61,6 +76,11 @@ func newFakeUpstream(t *testing.T, handler func(w dns.ResponseWriter, req *dns.M
 	})
 
 	return f
+}
+
+func testLogger(t *testing.T) *zap.Logger {
+	t.Helper()
+	return zaptest.NewLogger(t)
 }
 
 func rr(t *testing.T, s string) dns.RR {
@@ -111,6 +131,21 @@ func freeAddr(t *testing.T, ip string) netip.AddrPort {
 	return netip.AddrPortFrom(netip.MustParseAddr(ip), uint16(port))
 }
 
+// acquireFree makes s listen on a free port of ip, retrying if another
+// test takes the port first.
+func acquireFree(t *testing.T, s *Server, ip string) netip.AddrPort {
+	t.Helper()
+	var err error
+	for i := 0; i < 50; i++ {
+		addr := freeAddr(t, ip)
+		if err = s.Acquire(addr); err == nil {
+			return addr
+		}
+	}
+	t.Fatal(err)
+	return netip.AddrPort{}
+}
+
 func matchSuffix(suffix string) func(string) bool {
 	return func(name string) bool {
 		return name == suffix || strings.HasSuffix(name, "."+suffix)
@@ -148,10 +183,7 @@ func newServer(t *testing.T, up *fakeUpstream, minTTL time.Duration) (*Server, n
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := freeAddr(t, "127.0.0.1")
-	if err := s.Acquire(addr); err != nil {
-		t.Fatal(err)
-	}
+	addr := acquireFree(t, s, "127.0.0.1")
 	t.Cleanup(s.Close)
 
 	return s, addr
@@ -174,6 +206,14 @@ func zoneHandler(t *testing.T, records map[string][]string) func(dns.ResponseWri
 			if r.Header().Rrtype == req.Question[0].Qtype || r.Header().Rrtype == dns.TypeCNAME {
 				resp.Answer = append(resp.Answer, r)
 			}
+		}
+		// like a real server, truncate what doesn't fit in a UDP message
+		if _, isUDP := w.RemoteAddr().(*net.UDPAddr); isUDP {
+			size := dns.MinMsgSize
+			if opt := req.IsEdns0(); opt != nil {
+				size = int(opt.UDPSize())
+			}
+			resp.Truncate(size)
 		}
 		_ = w.WriteMsg(resp)
 	}
@@ -469,8 +509,7 @@ func TestUpstreamFailover(t *testing.T) {
 		Timeout:   time.Second,
 	})
 	is.NoErr(err)
-	addr := freeAddr(t, "127.0.0.1")
-	is.NoErr(s.Acquire(addr))
+	addr := acquireFree(t, s, "127.0.0.1")
 	t.Cleanup(s.Close)
 	s.Register([]netip.Addr{netip.MustParseAddr("127.0.0.1")}, &Policy{
 		Name: clientName, Match: matchSuffix("corp.test"), Allow: (&recorder{}).allow,
@@ -491,8 +530,7 @@ func TestUpstreamDown(t *testing.T) {
 		Timeout:   300 * time.Millisecond,
 	})
 	is.NoErr(err)
-	addr := freeAddr(t, "127.0.0.1")
-	is.NoErr(s.Acquire(addr))
+	addr := acquireFree(t, s, "127.0.0.1")
 	t.Cleanup(s.Close)
 	s.Register([]netip.Addr{netip.MustParseAddr("127.0.0.1")}, &Policy{
 		Name: clientName, Match: matchSuffix("corp.test"), Allow: (&recorder{}).allow,

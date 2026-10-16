@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/net/idna"
@@ -74,11 +75,22 @@ func normalizeDomain(s string) (string, error) {
 	if strings.HasPrefix(s, ".") || strings.Contains(s, "..") {
 		return "", fmt.Errorf("invalid domain %q: empty label", s)
 	}
+	if !utf8.ValidString(s) {
+		return "", fmt.Errorf("invalid domain %q: not valid UTF-8", s)
+	}
 	name, err := idna.Lookup.ToASCII(s)
 	if err != nil {
 		return "", fmt.Errorf("invalid domain %q: %w", s, err)
 	}
-	name = strings.ToLower(name)
+	name = asciiLower(name)
+	// the result must be a name that can be matched, and converting it
+	// again must not change it
+	if !plainName(name) {
+		return "", fmt.Errorf("invalid domain %q: contains characters that are not allowed in a name", s)
+	}
+	if again, err := idna.Lookup.ToASCII(name); err != nil || again != name {
+		return "", fmt.Errorf("invalid domain %q: not a valid name", s)
+	}
 	if len(name) > maxDomainLen {
 		return "", fmt.Errorf("invalid domain %q: longer than %d characters", s, maxDomainLen)
 	}
@@ -154,7 +166,10 @@ func (d domainsList) MarshalLogArray(enc zapcore.ArrayEncoder) error {
 // matches reports whether any pattern matches name. name does not need to
 // be normalized.
 func (d domainsList) matches(name string) bool {
-	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	name = asciiLower(strings.TrimSuffix(name, "."))
+	if !plainName(name) {
+		return false
+	}
 	for _, p := range d {
 		if p.matches(name) {
 			return true
@@ -162,4 +177,42 @@ func (d domainsList) matches(name string) bool {
 	}
 
 	return false
+}
+
+// plainName reports whether name consists of non-empty labels of
+// printable ASCII characters. Names that don't, such as ones with
+// control characters or non-ASCII bytes, can't be what an administrator
+// allowed and are never matched, not even by wildcards.
+func plainName(name string) bool {
+	if name == "" || name[0] == '.' || name[len(name)-1] == '.' {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c <= ' ' || c >= 0x7f {
+			return false
+		}
+		if c == '.' && name[i-1] == '.' {
+			return false
+		}
+	}
+	return true
+}
+
+// asciiLower lower-cases ASCII letters only. strings.ToLower also folds
+// some non-ASCII characters to ASCII ones (the Kelvin sign U+212A becomes
+// "k"), which would make a different name match a pattern.
+func asciiLower(s string) string {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; 'A' <= c && c <= 'Z' {
+			b := []byte(s)
+			for j := i; j < len(b); j++ {
+				if 'A' <= b[j] && b[j] <= 'Z' {
+					b[j] += 'a' - 'A'
+				}
+			}
+			return string(b)
+		}
+	}
+	return s
 }

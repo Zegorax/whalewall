@@ -42,6 +42,9 @@ type DNSOptions struct {
 	MinTTL time.Duration
 	// Grace is added to the time an address stays allowed.
 	Grace time.Duration
+	// MaxTTL is the longest an address stays allowed, whatever TTL its
+	// record has.
+	MaxTTL time.Duration
 }
 
 // Option configures a [RuleManager].
@@ -405,10 +408,21 @@ func (r *RuleManager) registerDNS(nfc firewallClient, id, name string, cfg confi
 	r.dnsPolicies[id] = policy
 	r.dnsMtx.Unlock()
 
+	// the host's addresses on the container's networks must never be
+	// reachable through a name, a rebinding attack would make a permitted
+	// name point at services on the host
+	gateways := make(map[netip.Addr]bool, len(endpoints))
+	for _, ep := range endpoints {
+		gateways[ep.gateway] = true
+	}
+
 	r.dns.Register(policy.addrs, &dnsproxy.Policy{
 		Name:    name,
 		Match:   policy.matches,
 		HasIPv6: hasFamily(states, family6),
+		Reject: func(a netip.Addr) bool {
+			return gateways[a] || r.local.contains(a)
+		},
 		Allow: func(ctx context.Context, qname string, addrs []dnsproxy.Resolved) error {
 			return r.allowAddrs(policy, qname, addrs)
 		},
@@ -502,12 +516,14 @@ func (r *RuleManager) initDNS() error {
 		Upstreams: upstreams,
 		MinTTL:    r.dnsOpts.MinTTL,
 		Grace:     r.dnsOpts.Grace,
+		MaxTTL:    r.dnsOpts.MaxTTL,
 	})
 	if err != nil {
 		return fmt.Errorf("error creating resolver: %w", err)
 	}
 	r.dns = srv
 	r.dnsPolicies = make(map[string]*domainPolicy)
+	r.local = &localAddrs{logger: r.logger, load: r.loadLocalAddrs}
 	r.logger.Info("DNS filtering enabled", zap.Strings("dns.upstreams", upstreams), zap.Uint16("dns.port", r.dnsOpts.Port))
 
 	return nil

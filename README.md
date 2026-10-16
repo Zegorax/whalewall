@@ -334,7 +334,23 @@ where possible.
 DNS traffic untouched.
 
 Flags: `-dns`, `-dns-port` (default 5353), `-dns-upstream` (comma-separated `host:port` list, default the
-servers in `/etc/resolv.conf`), `-dns-min-ttl` (default 30s) and `-dns-grace` (default 5s).
+servers in `/etc/resolv.conf`), `-dns-min-ttl` (default 30s), `-dns-max-ttl` (default 1h, caps
+huge TTLs) and `-dns-grace` (default 5s).
+
+Hardening applied to resolved answers:
+
+- Addresses that are loopback, link-local, multicast or unspecified, the host's own addresses and the
+gateways of Docker bridge networks are removed from answers, so an allowed name can not be made to
+point at the host (DNS rebinding). If nothing is left the container gets an empty answer.
+- At most 64 addresses are accepted per answer, and every TTL is clamped to the
+`-dns-min-ttl`/`-dns-max-ttl` range.
+- Queries that are not class IN, zone transfers (AXFR/IXFR), ANY queries and names with unusual
+characters are refused. Look-alike names (other-case Unicode, trailing dots, embedded NULs) never match.
+
+Known limitations: another container on the same bridge can be reached if an allowed name resolves to
+its address; a container with `NET_RAW` can spoof the source address of another container on the same
+bridge; networks connected to a container after it started are not managed; a privileged container can
+change its own network configuration.
 
 ### IPv6
 

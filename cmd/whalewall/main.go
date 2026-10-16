@@ -39,6 +39,7 @@ func mainRetCode() int {
 	dnsPort := flag.Uint("dns-port", 5353, "port the DNS resolver listens on, on the gateway address of each managed network")
 	dnsUpstream := flag.String("dns-upstream", "", "comma-separated host:port list of upstream DNS servers; defaults to the servers in /etc/resolv.conf")
 	dnsMinTTL := flag.Duration("dns-min-ttl", 30*time.Second, "minimum time an address resolved from an allowed domain stays allowed")
+	dnsMaxTTL := flag.Duration("dns-max-ttl", time.Hour, "maximum time an address resolved from an allowed domain stays allowed, whatever the TTL of the record is")
 	dnsGrace := flag.Duration("dns-grace", 5*time.Second, "time added to the TTL of every resolved address")
 	displayVersion := flag.Bool("version", false, "print version and build information and exit")
 	flag.Parse()
@@ -106,6 +107,7 @@ func mainRetCode() int {
 		dnsOpts := whalewall.DNSOptions{
 			Port:   uint16(*dnsPort),
 			MinTTL: *dnsMinTTL,
+			MaxTTL: *dnsMaxTTL,
 			Grace:  *dnsGrace,
 		}
 		if *dnsUpstream != "" {

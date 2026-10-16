@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -69,6 +70,9 @@ type RuleManager struct {
 	dns         dnsServer
 	dnsMtx      sync.Mutex
 	dnsPolicies map[string]*domainPolicy
+	local       *localAddrs
+	// interfaceAddrs lists the addresses of the host's interfaces
+	interfaceAddrs func() ([]net.Addr, error)
 }
 
 type dockerClientCreator func() (dockerClient, error)
@@ -98,6 +102,7 @@ func NewRuleManager(ctx context.Context, logger *zap.Logger, dbFile string, time
 		newFirewallClient: func() (firewallClient, error) {
 			return nftables.New()
 		},
+		interfaceAddrs:   net.InterfaceAddrs,
 		containerTracker: container.NewTracker(logger),
 		createCh:         make(chan containerDetails),
 		deleteCh:         make(chan string),

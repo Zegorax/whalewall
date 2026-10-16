@@ -44,7 +44,26 @@ ttl.corp.test A 2 10.99.0.10
 shared.corp.test A 60 10.99.0.10
 other.test A 60 10.99.0.20
 *.other.test A 60 10.99.0.20
+kube.corp.test A 60 10.99.0.10
+c.corp.test A 60 10.98.0.10
+forever.corp.test A 4294967295 10.99.0.10
+rebind.corp.test A 60 10.99.0.1
+rebind.corp.test A 60 127.0.0.1
+rebind.corp.test A 60 169.254.169.254
+gw.corp.test A 60 10.99.0.1
+gw2.corp.test A 60 10.98.0.1
 EOF
+	# every address the host itself has, any of them reaches host services
+	local n=0 hostip
+	for hostip in $(awk '/\|--/ {a=$2} /\/32 host LOCAL/ {print a}' /proc/net/fib_trie | sort -u | grep -v '^127\.'); do
+		n=$((n + 1))
+		echo "host$n.corp.test A 60 $hostip" >>"$OUT/zone.txt"
+	done
+	HOST_NAMES=$n
+	# an answer with far more addresses than should ever be allowed
+	for i in $(seq 1 300); do
+		echo "many.corp.test A 60 10.99.$((1 + i / 250)).$((i % 250 + 1))" >>"$OUT/zone.txt"
+	done
 	local listen=127.0.0.1:5300
 	if [ "$E2E_IPV6" = 1 ]; then
 		cat >>"$OUT/zone.txt" <<EOF
@@ -64,6 +83,14 @@ EOF
 	else
 		docker network create --subnet "$SUBNET4" "$NET" >/dev/null || exit 1
 	fi
+
+	# a second network and a host service for the adversarial scenarios
+	docker network rm "$NET2" >/dev/null 2>&1
+	docker network create --subnet 10.98.0.0/24 "$NET2" >/dev/null || exit 1
+	docker rm -f web-c >/dev/null 2>&1
+	docker run -d --name web-c --network "$NET2" --ip 10.98.0.10 -v "$ROOT/e2e/bin:/e2e:ro" --entrypoint /e2e/web "$IMG" -name web-c >/dev/null || exit 1
+	"$ROOT/e2e/bin/web" -name host-web -ports 8080,9999 >"$OUT/hostweb.out" 2>&1 &
+	HOSTWEB_PID=$!
 
 	local name ip
 	for spec in "web-a 10" "web-b 20"; do
@@ -86,7 +113,9 @@ teardown() {
 	[ -n "${WW_PID:-}" ] && sleep 2
 	ww_stop
 	[ -n "${FAKEDNS_PID:-}" ] && kill "$FAKEDNS_PID" 2>/dev/null
-	docker network rm "$NET" >/dev/null 2>&1
+	[ -n "${HOSTWEB_PID:-}" ] && kill "$HOSTWEB_PID" 2>/dev/null
+	docker ps -aq --filter "network=$NET2" | xargs -r docker rm -f >/dev/null 2>&1
+	docker network rm "$NET" "$NET2" >/dev/null 2>&1
 	"$WW" -clear -d "$OUT/data" >/dev/null 2>&1
 }
 trap teardown EXIT
@@ -547,6 +576,249 @@ s22() {
 	sc_end
 }
 
+# --------------------------------------------------- adversarial scenarios
+
+# rawdns <container> <printf string> sends a hand-made DNS message to a
+# public address (which whalewall redirects to its resolver) and logs the
+# start of the answer and its response code.
+rawdns() {
+	local c=$1 pkt=$2
+	cexec "$c" "printf '$pkt' | nc -u -w 2 8.8.8.8 53 | od -An -tx1 | head -n 1 | awk '{print; print \"rcode=\" substr(\$4, 2, 1)}'"
+}
+
+DNS_HDR='\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00'
+DNS_KUBE='\x04kube\x04corp\x04test\x00'
+
+s24() {
+	sc_begin 24 dns-protocol-abuse "Hand-made DNS messages can not be used to get around the policy"
+	start_client pa 10.99.0.71 "$(rules '["kube.corp.test"]')" --dns "$DUMMY_DNS"
+	local before
+	before=$(fakedns_queries kube.corp.test)
+
+	say "a valid query for the allowed name works"
+	rawdns pa "$DNS_HDR$DNS_KUBE\x00\x01\x00\x01"
+	assert_contains "rcode=0" "the allowed name is answered"
+	assert_eq "$(fakedns_queries kube.corp.test)" "$((before + 1))" "it was forwarded to the upstream once"
+
+	say "the Kelvin sign (U+212A) folds to k with Unicode lower-casing; it must not be treated as kube.corp.test"
+	rawdns pa "$DNS_HDR\x06\xe2\x84\xaaube\x04corp\x04test\x00\x00\x01\x00\x01"
+	assert_contains "rcode=3" "the look-alike name is denied"
+	say "a dot inside a label, and a NUL inside a label"
+	rawdns pa "$DNS_HDR\x09kube.corp\x04test\x00\x00\x01\x00\x01"
+	assert_contains "rcode=3" "a dot inside a label is denied"
+	rawdns pa "$DNS_HDR\x05kube\x00\x04corp\x04test\x00\x00\x01\x00\x01"
+	assert_contains "rcode=3" "a NUL inside a label is denied"
+
+	say "other classes and record types that would reveal more than a lookup"
+	rawdns pa "$DNS_HDR$DNS_KUBE\x00\x10\x00\x03"
+	assert_contains "rcode=5" "a CHAOS class query is refused"
+	rawdns pa "$DNS_HDR$DNS_KUBE\x00\xfc\x00\x01"
+	assert_contains "rcode=5" "a zone transfer (AXFR) is refused"
+	rawdns pa "$DNS_HDR$DNS_KUBE\x00\xff\x00\x01"
+	assert_contains "rcode=5" "an ANY query is refused"
+
+	say "two questions in one message, the second for a denied name"
+	rawdns pa "\x12\x34\x01\x00\x00\x02\x00\x00\x00\x00\x00\x00$DNS_KUBE\x00\x01\x00\x01\x04evil\x05other\x04test\x00\x00\x01\x00\x01"
+	assert_contains "rcode=1" "the message is rejected as malformed"
+	say "an UPDATE message"
+	rawdns pa "\x12\x34\x28\x00\x00\x01\x00\x00\x00\x00\x00\x00$DNS_KUBE\x00\x06\x00\x01"
+	assert_contains "rcode=4" "the opcode is not implemented"
+
+	say "random bytes and a truncated header get no answer"
+	cexec pa "head -c 64 /dev/urandom | nc -u -w 1 8.8.8.8 53 | od -An -tx1 | head -n 1"
+	cexec pa "printf '\x12\x34\x01' | nc -u -w 1 8.8.8.8 53 | od -An -tx1 | head -n 1"
+	say "the resolver is still alive and enforcing the policy"
+	rawdns pa "$DNS_HDR$DNS_KUBE\x00\x01\x00\x01"
+	assert_contains "rcode=0" "the allowed name still works"
+	cexec pa "nslookup evil.other.test"
+	assert_contains "NXDOMAIN" "a denied name is still denied"
+	hostsh "kill -0 $WW_PID && echo whalewall is running"
+	assert_contains "whalewall is running" "whalewall did not crash"
+	assert_eq "$(fakedns_queries kube.corp.test)" "$((before + 2))" "only the two valid queries reached the upstream"
+	assert_eq "$(fakedns_queries evil.other.test)" 0 "the denied name never reached the upstream"
+	rm_containers pa
+	sc_end
+}
+
+s25() {
+	sc_begin 25 host-protection "A permitted name can not be made to point at the host"
+	start_client hp 10.99.0.72 "$(rules '["**.corp.test"]')" --dns "$DUMMY_DNS"
+	say "a service on the host listens on 8080 and 9999"
+	hostsh "curl -sS -m 3 http://127.0.0.1:8080/"
+	assert_contains "hello from host-web" "the host service works"
+
+	say "names that resolve to the host, loopback and the cloud metadata address"
+	for n in gw rebind; do
+		cexec hp "nslookup $n.corp.test"
+		assert_not_contains "Address: 10.99.0.1" "$n.corp.test does not return the gateway"
+		assert_not_contains "Address: 127." "$n.corp.test does not return loopback"
+		assert_not_contains "Address: 169.254" "$n.corp.test does not return the link-local address"
+	done
+	say "the gateway of another network, and every address of the host, are the host too"
+	cexec hp "nslookup gw2.corp.test"
+	assert_not_contains "Address: 10.98.0.1" "gw2.corp.test does not return the gateway of the other network"
+	local k
+	for k in $(seq 1 "${HOST_NAMES:-0}"); do
+		cexec hp "nslookup host$k.corp.test"
+		assert_not_contains "Address: 1" "host$k.corp.test does not return an address of the host"
+	done
+	curl_in hp "http://gw.corp.test:8080/"
+	assert_fail "the name that points at the host is not usable"
+	set_elements hp 0
+	assert_not_contains "10.99.0.1 " "the gateway is not in the container's set"
+
+	say "reaching the host directly"
+	curl_in hp "http://$GW4:8080/"
+	assert_fail "the host's service on the gateway is unreachable"
+	curl_in hp "http://$GW4:9999/"
+	assert_fail "the host's other port is unreachable"
+	cexec hp "nc -w 2 -z $GW4 22"
+	assert_fail "ssh on the gateway is unreachable"
+	rm_containers hp
+	sc_end
+}
+
+s26() {
+	sc_begin 26 answer-abuse "Huge TTLs and huge answers do not open the firewall for long or wide"
+	start_client aa 10.99.0.73 "$(rules '["**.corp.test"]')" --dns "$DUMMY_DNS"
+	say "whalewall runs with -dns-max-ttl 20s; forever.corp.test has a TTL of 4294967295 seconds"
+	cexec aa "nslookup forever.corp.test"
+	assert_contains "10.99.0.10" "the name resolves"
+	set_elements aa 0
+	assert_contains "timeout 21s" "the entry lives at most max TTL plus grace, not 136 years"
+	say "many.corp.test has 300 addresses; the container is shown how many?"
+	cexec aa "nslookup many.corp.test | grep -c Address"
+	local shown=$LAST_OUT
+	hostsh "nft list set ip filter ww-$(cid aa)-0-4 | grep -o '10\.99\.[0-9]*\.[0-9]*' | sort -u | grep -v '10\.99\.0\.10$' | wc -l"
+	local inset=$LAST_OUT
+	if [ "$inset" -le 64 ] && [ "$inset" -gt 0 ]; then pass "at most 64 of the 300 addresses were allowed ($inset)"; else fail "$inset addresses were allowed"; fi
+	if [ "$shown" -le 70 ]; then pass "the container saw at most 64 of them too ($shown address lines)"; else fail "the container was shown $shown address lines"; fi
+	say "an address beyond the cap is not reachable"
+	curl_in aa "http://10.99.2.50:8080/"
+	assert_fail "an address that was cut off is not allowed"
+	rm_containers aa
+	sc_end
+}
+
+s27() {
+	sc_begin 27 other-protocols "ICMP and other tricks do not get through to allowed addresses"
+	start_plain pg 10.99.0.74
+	cexec pg "ping -c 1 -W 2 10.99.0.10"
+	assert_rc 0 "an unmanaged container can ping web-a (the tool works)"
+	start_client rp 10.99.0.75 "$(rules '["a.corp.test"]')" --dns "$DUMMY_DNS"
+	curl_in rp "http://a.corp.test:8080/"
+	assert_contains "hello from web-a" "the allowed name works over tcp/8080"
+	cexec rp "ping -c 1 -W 2 10.99.0.10"
+	assert_fail "ICMP echo to the allowed address is dropped"
+	cexec rp "ping -c 1 -W 2 $GW4"
+	assert_fail "ICMP echo to the gateway is dropped"
+	cexec rp "ping -c 1 -W 2 10.99.0.20"
+	assert_fail "ICMP echo to another container is dropped"
+	cexec rp "nc -w 2 -z -p 53 10.99.0.20 8080"
+	assert_fail "using source port 53 does not open web-b"
+	cexec rp "nc -w 2 -z -p 8080 10.99.0.20 8080"
+	assert_fail "using source port 8080 does not open web-b"
+	rm_containers pg rp
+	sc_end
+}
+
+s28() {
+	sc_begin 28 multi-network "A container on two networks is filtered on both"
+	docker rm -f mn >/dev/null 2>&1
+	run docker create --name mn --network "$NET" --ip 10.99.0.62 --dns "$DUMMY_DNS" --entrypoint sleep -l whalewall.enabled=true -l "whalewall.rules=$(rules '["**.corp.test"]')" "$IMG" infinity
+	run docker network connect --ip 10.98.0.62 "$NET2" mn
+	run docker start mn
+	wait_rules mn
+	cexec mn "nslookup a.corp.test"
+	assert_contains "10.99.0.10" "a.corp.test resolves"
+	curl_in mn "http://a.corp.test:8080/"
+	assert_contains "hello from web-a" "web-a is reachable on the first network"
+	curl_in mn "http://c.corp.test:8080/"
+	assert_contains "hello from web-c" "web-c is reachable on the second network by name"
+	curl_in mn "http://10.99.0.20:8080/"
+	assert_fail "web-b is unreachable by IP on the first network"
+	curl_in mn "http://10.98.0.10:2222/"
+	assert_fail "web-c's other port is unreachable"
+	hostsh "nft list table ip whalewall-nat | grep -c 'saddr 10.9[89].0.62' || true"
+	assert_eq "$LAST_OUT" 4 "DNS is redirected for both addresses (udp and tcp each)"
+	set_elements mn 0
+	assert_contains "10.98.0.10" "the address behind the second network is in the set"
+	rm_containers mn
+	sc_end
+}
+
+s29() {
+	sc_begin 29 churn "Starting and removing many containers at once leaves nothing behind"
+	local i pids=()
+	for i in $(seq 1 12); do
+		(docker run -d --name "ch$i" --network "$NET" --ip "10.99.0.$((110 + i))" --dns "$DUMMY_DNS" --entrypoint sleep \
+			-l whalewall.enabled=true -l "whalewall.rules=$(rules '["a.corp.test"]')" "$IMG" infinity >/dev/null 2>&1) &
+		pids+=($!)
+	done
+	wait "${pids[@]}"
+	for i in $(seq 1 12); do wait_rules "ch$i"; done
+	hostsh "nft list ruleset 2>/dev/null | grep -c 'set ww-' || true"
+	assert_eq "$LAST_OUT" 12 "every container has its own set"
+	for i in 1 6 12; do
+		curl_in "ch$i" "http://a.corp.test:8080/"
+		assert_contains "hello from web-a" "ch$i reaches a.corp.test"
+		curl_in "ch$i" "http://10.99.0.20:8080/"
+		assert_fail "ch$i can not reach web-b"
+	done
+	say "queries from all containers at once"
+	pids=()
+	for i in $(seq 1 12); do
+		(docker exec "ch$i" sh -c 'for n in 1 2 3 4 5; do nslookup a.corp.test >/dev/null 2>&1; nslookup evil.other.test >/dev/null 2>&1; done' >/dev/null 2>&1) &
+		pids+=($!)
+	done
+	wait "${pids[@]}"
+	hostsh "kill -0 $WW_PID && echo whalewall is running"
+	assert_contains "whalewall is running" "whalewall survived the load"
+
+	say "all containers are removed at the same time"
+	pids=()
+	for i in $(seq 1 12); do
+		(docker rm -f "ch$i" >/dev/null 2>&1) &
+		pids+=($!)
+	done
+	wait "${pids[@]}"
+	sleep 5
+	hostsh "nft list ruleset 2>/dev/null | grep -c 'ww-\|whalewall-ch' || true"
+	assert_eq "$LAST_OUT" 0 "no sets, chains or rules are left"
+	hostsh "nft list table ip whalewall-nat 2>/dev/null | grep -c 'saddr 10.99.0.1[0-9][0-9]' || true"
+	assert_eq "$LAST_OUT" 0 "no DNS redirect rules are left"
+
+	say "the same name and address are reused five times in a row"
+	for i in 1 2 3 4 5; do
+		docker run -d --name flap --network "$NET" --ip 10.99.0.140 --dns "$DUMMY_DNS" --entrypoint sleep \
+			-l whalewall.enabled=true -l "whalewall.rules=$(rules '["a.corp.test"]')" "$IMG" infinity >/dev/null
+		wait_rules flap
+		docker rm -f flap >/dev/null
+		sleep 0.5
+	done
+	sleep 3
+	hostsh "nft list ruleset 2>/dev/null | grep -c 'ww-\|whalewall-flap' || true"
+	assert_eq "$LAST_OUT" 0 "nothing is left after the flapping container"
+	say "kernel audit records of seccomp kills for whalewall since this run started: $(seccomp_events)"
+	assert_eq "$(seccomp_events)" 0 "whalewall was not killed by seccomp"
+	sc_end
+}
+
+s30() {
+	sc_begin 30 network-connect "Known limitation: a network connected after start is not managed"
+	start_client nc2 10.99.0.64 "$(rules '["a.corp.test"]')" --dns "$DUMMY_DNS"
+	curl_in nc2 "http://10.98.0.10:8080/"
+	assert_fail "web-c on the second network is unreachable before connecting"
+	say "an administrator connects the running container to a second network"
+	run docker network connect --ip 10.98.0.64 "$NET2" nc2
+	sleep 2
+	curl_in nc2 "http://10.98.0.10:8080/"
+	assert_contains "hello from web-c" "the new interface is not filtered (whalewall only sees container starts)"
+	say "this needs access to the Docker API, a container can not do it itself; restart the container to apply rules to all its networks"
+	rm_containers nc2
+	sc_end
+}
+
 s23() {
 	sc_begin 23 clear "whalewall -clear removes everything it created"
 	rm_containers $(docker ps -aq --filter label=whalewall.enabled=true) 2>/dev/null
@@ -569,7 +841,7 @@ s23() {
 # ----------------------------------------------------------------- main
 
 setup
-for n in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23; do
+for n in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 24 25 26 27 28 29 30 23; do
 	want "$n" && "s$n"
 done
 
