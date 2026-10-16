@@ -757,8 +757,8 @@ s29() {
 	done
 	wait "${pids[@]}"
 	for i in $(seq 1 12); do wait_rules "ch$i"; done
-	hostsh "nft list ruleset 2>/dev/null | grep -c 'set ww-' || true"
-	assert_eq "$LAST_OUT" 12 "every container has its own set"
+	hostsh "nft list table ip filter 2>/dev/null | grep -c 'set ww-' || true"
+	assert_eq "$LAST_OUT" 12 "every container has its own IPv4 set"
 	for i in 1 6 12; do
 		curl_in "ch$i" "http://a.corp.test:8080/"
 		assert_contains "hello from web-a" "ch$i reaches a.corp.test"
