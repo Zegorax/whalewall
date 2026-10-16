@@ -484,7 +484,7 @@ s18() {
 	hostsh "nft rename chain ip6 filter DOCKER-USER DOCKER-USER-hidden"
 	ww_start
 	start_client fc 10.99.0.56 "$(rules '["a.corp.test"]')" --dns "$DUMMY_DNS"
-	ww_log_excerpt 'IPv6.*fc' 1
+	ww_log_excerpt 'container.name\":\"fc\".*IPv6' 1
 	assert_contains "IPv6 traffic can't be managed" "whalewall refuses to manage the container and says why"
 	ww_stop
 	hostsh "nft rename chain ip6 filter DOCKER-USER-hidden DOCKER-USER"
@@ -556,7 +556,12 @@ s23() {
 	hostsh "nft list tables | grep -c whalewall || true"
 	assert_eq "$LAST_OUT" 0 "no whalewall tables remain"
 	hostsh "nft list ruleset 2>/dev/null | grep -c 'whalewall\|ww-' || true"
-	assert_eq "$LAST_OUT" 0 "no whalewall chains, sets or rules remain"
+	local left=$LAST_OUT
+	if [ "$left" != 0 ]; then
+		say "leftovers:"
+		hostsh "nft -a list ruleset 2>/dev/null | grep -B2 'whalewall\|ww-'"
+	fi
+	assert_eq "$left" 0 "no whalewall chains, sets or rules remain"
 	sc_end
 	ww_start
 }

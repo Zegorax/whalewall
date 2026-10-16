@@ -205,10 +205,12 @@ func (r *RuleManager) deleteContainerRules(ctx context.Context, id, name string)
 
 	// stop the resolver from answering for this container before the
 	// container's addresses can be reused
-	if r.dnsEnabled {
+	if r.dns != nil {
 		r.unregisterDNS(id)
-		r.deleteDNATRules(nfc, logger, id)
 	}
+	// rules created while DNS filtering was enabled have to be removed
+	// even if it isn't anymore
+	r.deleteDNATRules(nfc, logger, id)
 
 	addrs, err := tx.GetContainerAddrs(ctx, id)
 	if err != nil {
@@ -221,13 +223,13 @@ func (r *RuleManager) deleteContainerRules(ctx context.Context, id, name string)
 	}
 
 	for _, fam := range families {
-		if fam.v6 && !r.ipv6Managed() {
-			continue
-		}
-
 		// delete rules from whalewall chain
 		rules, err := nfc.GetRules(fam.table, fam.whalewallChain)
 		if err != nil {
+			if fam.v6 {
+				// IPv6 is not managed
+				continue
+			}
 			return fmt.Errorf("error getting rules of chain %s: %w", fam.whalewallChain.Name, err)
 		}
 		deleteRulesFromContainer(logger, nfc, rules, id)
@@ -275,9 +277,7 @@ func (r *RuleManager) deleteContainerRules(ctx context.Context, id, name string)
 		}
 	}
 
-	if r.dnsEnabled {
-		r.deleteDomainSets(nfc, logger, id)
-	}
+	r.deleteDomainSets(nfc, logger, id)
 
 	logger.Debug("deleting from database")
 	if err := r.deleteContainer(ctx, tx, id); err != nil {

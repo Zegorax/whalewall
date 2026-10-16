@@ -246,6 +246,7 @@ func (r *RuleManager) deleteDNATRules(nfc firewallClient, logger *zap.Logger, id
 		chain := natFamilyChain(fam)
 		rules, err := nfc.GetRules(chain.Table, chain)
 		if err != nil {
+			// the table doesn't exist if DNS filtering was never used
 			continue
 		}
 		deleteRulesFromContainer(logger, nfc, rules, id)
