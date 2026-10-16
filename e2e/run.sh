@@ -474,7 +474,7 @@ s17() {
 }
 
 s18() {
-	sc_begin 18 ipv6-fail-closed "A container with IPv6 is not left open if IPv6 can not be managed"
+	sc_begin 18 ipv6-not-managed "A container with IPv6 is refused loudly when IPv6 can not be managed"
 	if ! has_v6; then
 		sc_skip "needs a Docker daemon with IPv6 (E2E_IPV6=1)"
 		return
