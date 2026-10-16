@@ -40,6 +40,7 @@ type ruleConfig struct {
 	LogPrefix string `yaml:"log_prefix"`
 	Network   string
 	IPs       []addrOrRange
+	Domains   domainsList
 	Container string
 	Proto     protocol
 	SrcPorts  []rulePorts `yaml:"src_ports"`
@@ -47,6 +48,9 @@ type ruleConfig struct {
 	Verdict   verdict
 
 	skip bool
+	// contAddrs are the addresses of the destination container of a
+	// rule that specifies a container
+	contAddrs []netip.Addr
 }
 
 func (r ruleConfig) MarshalLogObject(enc zapcore.ObjectEncoder) error {
@@ -58,6 +62,11 @@ func (r ruleConfig) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	}
 	if len(r.IPs) != 0 {
 		if err := enc.AddArray("ips", addrsList(r.IPs)); err != nil {
+			return err
+		}
+	}
+	if len(r.Domains) != 0 {
+		if err := enc.AddArray("domains", r.Domains); err != nil {
 			return err
 		}
 	}
@@ -323,11 +332,26 @@ func validateConfig(c config) error {
 }
 
 func validateRule(r ruleConfig) error {
-	if len(r.IPs) == 0 && r.Container == "" && r.Proto == invalidProto && len(r.SrcPorts) == 0 && len(r.DstPorts) == 0 {
+	if len(r.IPs) == 0 && len(r.Domains) == 0 && r.Container == "" && r.Proto == invalidProto && len(r.SrcPorts) == 0 && len(r.DstPorts) == 0 {
 		return errors.New("rule is empty")
 	}
 	if len(r.IPs) != 0 && r.Container != "" {
 		return errors.New(`"ip" and "container" are mutually exclusive`)
+	}
+
+	if len(r.Domains) != 0 {
+		if len(r.IPs) != 0 {
+			return errors.New(`"domains" and "ips" are mutually exclusive`)
+		}
+		if r.Container != "" {
+			return errors.New(`"domains" and "container" are mutually exclusive`)
+		}
+		if r.Network != "" {
+			return errors.New(`"domains" and "network" are mutually exclusive`)
+		}
+		if r.Proto == invalidProto || len(r.DstPorts) == 0 {
+			return errors.New(`"proto" and "dst_ports" must be set when "domains" is set`)
+		}
 	}
 
 	if r.Network == "" && r.Container != "" {

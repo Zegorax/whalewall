@@ -57,8 +57,18 @@ type RuleManager struct {
 	createCh chan containerDetails
 	deleteCh chan string
 
+	// ipv6Ready is true when the base rules for IPv6 exist
+	ipv6Mtx   sync.Mutex
+	ipv6Ready bool
+
 	db        database.DB
 	dockerCli dockerClient
+
+	dnsEnabled  bool
+	dnsOpts     DNSOptions
+	dns         dnsServer
+	dnsMtx      sync.Mutex
+	dnsPolicies map[string]*domainPolicy
 }
 
 type dockerClientCreator func() (dockerClient, error)
@@ -70,7 +80,7 @@ type containerDetails struct {
 	isNew     bool
 }
 
-func NewRuleManager(ctx context.Context, logger *zap.Logger, dbFile string, timeout time.Duration) (*RuleManager, error) {
+func NewRuleManager(ctx context.Context, logger *zap.Logger, dbFile string, timeout time.Duration, opts ...Option) (*RuleManager, error) {
 	r := RuleManager{
 		stopping: make(chan struct{}),
 		done:     make(chan struct{}),
@@ -92,6 +102,9 @@ func NewRuleManager(ctx context.Context, logger *zap.Logger, dbFile string, time
 		createCh:         make(chan containerDetails),
 		deleteCh:         make(chan string),
 	}
+	for _, opt := range opts {
+		opt(&r)
+	}
 	err := r.initDB(ctx, dbFile)
 	if err != nil {
 		return nil, err
@@ -104,8 +117,16 @@ func (r *RuleManager) Start(ctx context.Context) error {
 	if err := r.init(ctx); err != nil {
 		return err
 	}
-	if err := r.createBaseRules(); err != nil {
+	if r.dnsEnabled {
+		if err := r.initDNS(); err != nil {
+			return err
+		}
+	}
+	if err := r.createFamilyBaseRules(family4); err != nil {
 		return fmt.Errorf("error creating base rules: %w", err)
+	}
+	if err := r.ensureIPv6BaseRules(); err != nil {
+		r.logger.Info("not managing IPv6 traffic", zap.Error(err))
 	}
 
 	if err := r.cleanupRules(ctx); err != nil {
@@ -293,10 +314,38 @@ func (r *RuleManager) Stop() {
 	close(r.stopping)
 	r.wg.Wait()
 
+	if r.dns != nil {
+		r.dns.Close()
+	}
+
 	if err := r.dockerCli.Close(); err != nil {
 		r.logger.Error("error closing docker client", zap.Error(err))
 	}
 	if err := r.db.Close(); err != nil {
 		r.logger.Error("error closing database: %w", zap.Error(err))
 	}
+}
+
+// ensureIPv6BaseRules creates the base rules for IPv6 if they don't
+// exist yet. IPv6 is only managed if Docker created the chains whalewall
+// hooks into, which requires Docker's ip6tables support.
+func (r *RuleManager) ensureIPv6BaseRules() error {
+	r.ipv6Mtx.Lock()
+	defer r.ipv6Mtx.Unlock()
+
+	if r.ipv6Ready {
+		return nil
+	}
+	if err := r.createFamilyBaseRules(family6); err != nil {
+		return err
+	}
+	r.ipv6Ready = true
+
+	return nil
+}
+
+func (r *RuleManager) ipv6Managed() bool {
+	r.ipv6Mtx.Lock()
+	defer r.ipv6Mtx.Unlock()
+	return r.ipv6Ready
 }

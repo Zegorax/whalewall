@@ -25,3 +25,6 @@
 
 ./cmd/whalewall/whalewall
 db.sqlite*
+/e2e/bin/
+/e2e/out/
+/e2e/render/node_modules/

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"syscall"
 
 	"github.com/docker/docker/client"
@@ -47,13 +48,36 @@ func (r *RuleManager) clearRules(ctx context.Context) error {
 		return fmt.Errorf("error creating netlink connection: %w", err)
 	}
 
+	for _, fam := range families {
+		if fam.v6 {
+			// only clear IPv6 if whalewall created rules for it
+			chains, err := nfc.ListChainsOfTableFamily(nftables.TableFamilyIPv6)
+			if err != nil {
+				return fmt.Errorf("error listing IPv6 chains: %w", err)
+			}
+			if !slices.ContainsFunc(chains, func(c *nftables.Chain) bool {
+				return c.Table.Name == filterTableName && c.Name == whalewallChainName
+			}) {
+				continue
+			}
+		}
+		if err := r.clearFamily(nfc, fam); err != nil {
+			return err
+		}
+	}
+
+	return r.clearNAT()
+}
+
+// clearFamily removes the base rules created for a family.
+func (r *RuleManager) clearFamily(nfc firewallClient, fam *family) error {
 	// delete jump rules to whalewall chain
 	for _, chainName := range []string{dockerChainName, inputChainName, outputChainName} {
 		chain := &nftables.Chain{
 			Name:  chainName,
-			Table: filterTable,
+			Table: fam.table,
 		}
-		rules, err := nfc.GetRules(filterTable, chain)
+		rules, err := nfc.GetRules(fam.table, chain)
 		if err != nil {
 			r.logger.Error("error getting rules of chain", zap.String("chain.name", chainName), zap.Error(err))
 			continue
@@ -72,13 +96,13 @@ func (r *RuleManager) clearRules(ctx context.Context) error {
 	}
 
 	// delete whalewall chain
-	nfc.DelChain(whalewallChain)
+	nfc.DelChain(fam.whalewallChain)
 	if err := ignoringErr(nfc.Flush, syscall.ENOENT); err != nil {
 		return fmt.Errorf("error deleting chain %q: %w", whalewallChainName, err)
 	}
 
 	// delete container address set
-	nfc.DelSet(containerAddrSet)
+	nfc.DelSet(fam.addrSet)
 	if err := ignoringErr(nfc.Flush, syscall.ENOENT); err != nil {
 		return fmt.Errorf("error deleting set %q: %w", containerAddrSetName, err)
 	}
@@ -179,29 +203,16 @@ func (r *RuleManager) deleteContainerRules(ctx context.Context, id, name string)
 	}
 	defer tx.Rollback()
 
-	// delete rules from whalewall chain
-	rules, err := nfc.GetRules(filterTable, whalewallChain)
-	if err != nil {
-		return fmt.Errorf("error getting rules of chain %s: %w", whalewallChain.Name, err)
+	// stop the resolver from answering for this container before the
+	// container's addresses can be reused
+	if r.dnsEnabled {
+		r.unregisterDNS(id)
+		r.deleteDNATRules(nfc, logger, id)
 	}
-	deleteRulesFromContainer(logger, nfc, rules, id)
 
 	addrs, err := tx.GetContainerAddrs(ctx, id)
 	if err != nil {
 		return fmt.Errorf("error getting container addrs: %w", err)
-	}
-
-	for _, addr := range addrs {
-		e := []nftables.SetElement{{Key: addr}}
-		if err := nfc.SetDeleteElements(containerAddrSet, e); err != nil {
-			logger.Error("error marshaling set elements", zap.Error(err))
-			continue
-		}
-		// flush after every element deletion to ensure all possible
-		// elements are deleted
-		if err := ignoringErr(nfc.Flush, syscall.ENOENT); err != nil {
-			logger.Error("error deleting set element", zap.Error(err))
-		}
 	}
 
 	estContainers, err := tx.GetEstContainers(ctx, id)
@@ -209,28 +220,63 @@ func (r *RuleManager) deleteContainerRules(ctx context.Context, id, name string)
 		return fmt.Errorf("error getting established containers: %w", err)
 	}
 
-	// delete rules in other container's chains
-	for _, estCont := range estContainers {
-		chain := &nftables.Chain{
-			Table: filterTable,
-			Name:  buildChainName(estCont.Name, estCont.DstContainerID),
-		}
-		rules, err := nfc.GetRules(chain.Table, chain)
-		if err != nil {
-			logger.Error("error getting rules of chain", zap.String("chain.name", chain.Name), zap.Error(err))
+	for _, fam := range families {
+		if fam.v6 && !r.ipv6Managed() {
 			continue
 		}
+
+		// delete rules from whalewall chain
+		rules, err := nfc.GetRules(fam.table, fam.whalewallChain)
+		if err != nil {
+			return fmt.Errorf("error getting rules of chain %s: %w", fam.whalewallChain.Name, err)
+		}
 		deleteRulesFromContainer(logger, nfc, rules, id)
+
+		for _, addr := range addrs {
+			if uint32(len(addr)) != fam.addrLen {
+				continue
+			}
+			e := []nftables.SetElement{{Key: addr}}
+			if err := nfc.SetDeleteElements(fam.addrSet, e); err != nil {
+				logger.Error("error marshaling set elements", zap.Error(err))
+				continue
+			}
+			// flush after every element deletion to ensure all possible
+			// elements are deleted
+			if err := ignoringErr(nfc.Flush, syscall.ENOENT); err != nil {
+				logger.Error("error deleting set element", zap.Error(err))
+			}
+		}
+
+		// delete rules in other container's chains
+		for _, estCont := range estContainers {
+			chain := &nftables.Chain{
+				Table: fam.table,
+				Name:  buildChainName(estCont.Name, estCont.DstContainerID),
+			}
+			rules, err := nfc.GetRules(chain.Table, chain)
+			if err != nil {
+				if !fam.v6 {
+					logger.Error("error getting rules of chain", zap.String("chain.name", chain.Name), zap.Error(err))
+				}
+				continue
+			}
+			deleteRulesFromContainer(logger, nfc, rules, id)
+		}
+
+		// delete container chain
+		chainName := buildChainName(name, id)
+		nfc.DelChain(&nftables.Chain{
+			Table: fam.table,
+			Name:  chainName,
+		})
+		if err := ignoringErr(nfc.Flush, syscall.ENOENT); err != nil {
+			logger.Error("error deleting chain", zap.String("chain.name", chainName), zap.Error(err))
+		}
 	}
 
-	// delete container chain
-	chainName := buildChainName(name, id)
-	nfc.DelChain(&nftables.Chain{
-		Table: filterTable,
-		Name:  chainName,
-	})
-	if err := ignoringErr(nfc.Flush, syscall.ENOENT); err != nil {
-		logger.Error("error deleting chain", zap.String("chain.name", chainName), zap.Error(err))
+	if r.dnsEnabled {
+		r.deleteDomainSets(nfc, logger, id)
 	}
 
 	logger.Debug("deleting from database")

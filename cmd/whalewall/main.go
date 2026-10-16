@@ -35,6 +35,11 @@ func mainRetCode() int {
 	debugLogs := flag.Bool("debug", false, "enable debug logging")
 	logPath := flag.String("l", "stdout", "path to log to")
 	timeout := flag.Duration("t", 10*time.Second, "timeout for Docker API requests")
+	dnsEnabled := flag.Bool("dns", false, "enable rules that allow traffic by domain name; starts a DNS resolver that managed containers' DNS queries are redirected to")
+	dnsPort := flag.Uint("dns-port", 5353, "port the DNS resolver listens on, on the gateway address of each managed network")
+	dnsUpstream := flag.String("dns-upstream", "", "comma-separated host:port list of upstream DNS servers; defaults to the servers in /etc/resolv.conf")
+	dnsMinTTL := flag.Duration("dns-min-ttl", 30*time.Second, "minimum time an address resolved from an allowed domain stays allowed")
+	dnsGrace := flag.Duration("dns-grace", 5*time.Second, "time added to the TTL of every resolved address")
 	displayVersion := flag.Bool("version", false, "print version and build information and exit")
 	flag.Parse()
 
@@ -92,7 +97,26 @@ func mainRetCode() int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	r, err := whalewall.NewRuleManager(ctx, logger, sqliteFile, *timeout)
+	var opts []whalewall.Option
+	if *dnsEnabled {
+		if *dnsPort == 0 || *dnsPort > 65535 {
+			logger.Error("invalid DNS port", zap.Uint("dns.port", *dnsPort))
+			return 1
+		}
+		dnsOpts := whalewall.DNSOptions{
+			Port:   uint16(*dnsPort),
+			MinTTL: *dnsMinTTL,
+			Grace:  *dnsGrace,
+		}
+		if *dnsUpstream != "" {
+			for _, up := range strings.Split(*dnsUpstream, ",") {
+				dnsOpts.Upstreams = append(dnsOpts.Upstreams, strings.TrimSpace(up))
+			}
+		}
+		opts = append(opts, whalewall.WithDNS(dnsOpts))
+	}
+
+	r, err := whalewall.NewRuleManager(ctx, logger, sqliteFile, *timeout, opts...)
 	if err != nil {
 		logger.Error("error initializing", zap.Error(err))
 	}
