@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/google/nftables"
@@ -16,7 +17,8 @@ import (
 
 const anonSetName = "__set%d"
 
-var setAllocNum = 1
+// setAllocNum is shared by all mock firewalls, which are used concurrently
+var setAllocNum atomic.Uint32
 
 type firewallClient interface {
 	AddTable(t *nftables.Table) *nftables.Table
@@ -254,11 +256,11 @@ func (m *mockFirewall) AddSet(s *nftables.Set, vals []nftables.SetElement) error
 
 	setName := s.Name
 	if s.Anonymous {
-		setName = fmt.Sprintf(anonSetName, setAllocNum)
-		s.ID = uint32(setAllocNum)
+		id := setAllocNum.Add(1)
+		setName = fmt.Sprintf(anonSetName, id)
+		s.ID = id
 		s.Name = anonSetName
 
-		setAllocNum++
 		t.newAnonSets[setName] = false
 	}
 
