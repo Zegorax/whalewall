@@ -23,6 +23,11 @@ on:
 
   workflow_dispatch: {}
 
+# evidence is committed back to the branch, so runs for one ref must not overlap
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -132,8 +137,15 @@ jobs:
             echo "no evidence changes"
           else
             git commit -m "Update end-to-end evidence from CI"
-            git pull --rebase origin "$GITHUB_REF_NAME"
-            git push origin "HEAD:$GITHUB_REF_NAME"
+            # this run's evidence is the newest, so it wins any conflict (in a
+            # rebase "theirs" is the commit being replayed)
+            for attempt in 1 2 3; do
+              git pull --rebase -X theirs origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME" && exit 0
+              git rebase --abort 2>/dev/null || true
+              sleep $((attempt * 3))
+            done
+            # the evidence is a convenience; the artifact still has it
+            echo "::warning::could not push the evidence commit"
           fi
 
       - name: Save Go cache
