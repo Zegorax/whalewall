@@ -96,7 +96,7 @@ type ipv6TestEnv struct {
 
 // newIPv6TestEnv creates a rule manager with a mock firewall that has
 // Docker's chains for the given families.
-func newIPv6TestEnv(t *testing.T, v4, v6, dnsEnabled bool) *ipv6TestEnv {
+func newIPv6TestEnv(t *testing.T, v6, dnsEnabled bool) *ipv6TestEnv {
 	t.Helper()
 
 	is := is.New(t)
@@ -116,7 +116,7 @@ func newIPv6TestEnv(t *testing.T, v4, v6, dnsEnabled bool) *ipv6TestEnv {
 	firewallCreator := newMockFirewallCreator(logger)
 	mfc := firewallCreator.newMockFirewall()
 	for _, fam := range families {
-		if (fam.v6 && !v6) || (!fam.v6 && !v4) {
+		if fam.v6 && !v6 {
 			continue
 		}
 		mfc.AddTable(fam.table)
@@ -204,7 +204,7 @@ func icmpv6Exprs(low, high byte) []expr.Any {
 func TestIPv6RuleCreation(t *testing.T) {
 	t.Parallel()
 
-	env := newIPv6TestEnv(t, true, true, false)
+	env := newIPv6TestEnv(t, true, false)
 	is := env.is
 	logger := zaptest.NewLogger(t)
 	comparer := func(r1, r2 *nftables.Rule) bool { return rulesEqual(logger, r1, r2) }
@@ -369,7 +369,7 @@ func cmpRule(comparer func(r1, r2 *nftables.Rule) bool, expected, got *nftables.
 func TestIPv6OnlyContainer(t *testing.T) {
 	t.Parallel()
 
-	env := newIPv6TestEnv(t, true, true, false)
+	env := newIPv6TestEnv(t, true, false)
 	is := env.is
 
 	c := dualStackContainer(cont1ID, cont1Name, map[string]string{
@@ -401,7 +401,7 @@ func TestIPv6NotManaged(t *testing.T) {
 	t.Parallel()
 
 	// Docker's IPv6 chains don't exist
-	env := newIPv6TestEnv(t, true, false, false)
+	env := newIPv6TestEnv(t, false, false)
 	is := env.is
 
 	is.True(env.r.ensureIPv6BaseRules() != nil)
@@ -427,7 +427,7 @@ func TestIPv6NotManaged(t *testing.T) {
 func TestDomainRuleCreation(t *testing.T) {
 	t.Parallel()
 
-	env := newIPv6TestEnv(t, true, true, true)
+	env := newIPv6TestEnv(t, true, true)
 	is := env.is
 	logger := zaptest.NewLogger(t)
 	comparer := func(r1, r2 *nftables.Rule) bool { return rulesEqual(logger, r1, r2) }
@@ -670,11 +670,10 @@ output:
   - domain: api.example.com`},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			env := newIPv6TestEnv(t, true, false, tt.dnsEnabled)
+			env := newIPv6TestEnv(t, false, tt.dnsEnabled)
 			is := env.is
 			logger := zaptest.NewLogger(t)
 			comparer := func(r1, r2 *nftables.Rule) bool { return rulesEqual(logger, r1, r2) }
@@ -703,7 +702,7 @@ output:
 func TestDomainSetsAreNotCreatedForOtherRules(t *testing.T) {
 	t.Parallel()
 
-	env := newIPv6TestEnv(t, true, false, true)
+	env := newIPv6TestEnv(t, false, true)
 	is := env.is
 
 	c := dualStackContainer(cont1ID, cont1Name, map[string]string{rulesLabel: `
@@ -727,7 +726,7 @@ output:
 func TestDomainRuleResolverFailure(t *testing.T) {
 	t.Parallel()
 
-	env := newIPv6TestEnv(t, true, false, true)
+	env := newIPv6TestEnv(t, false, true)
 	is := env.is
 	env.dns.acquireErr = errors.New("address not available")
 

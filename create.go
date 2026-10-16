@@ -185,7 +185,9 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 	var states []*famState
 	if len(addrs4) != 0 {
 		states = append(states, &famState{fam: family4, addrs: addrs4})
-		maps.Copy(allNets, addrs4)
+		for netName, addr := range addrs4 {
+			allNets[netName] = addr
+		}
 	}
 	if len(addrs6) != 0 {
 		if err := r.ensureIPv6BaseRules(); err != nil {
@@ -277,7 +279,7 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 			if err := ignoringErr(nfc.Flush, syscall.ENOENT); err != nil {
 				logger.Error("error deleting chain", zap.String("chain.name", st.chain.Name), zap.Error(err))
 			}
-			r.cleanupDomainState(nfc, logger, container.ID, st)
+			r.cleanupDomainState(nfc, logger, st)
 		}
 	}()
 
@@ -432,7 +434,7 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 		for _, st := range states {
 			endpoints = append(endpoints, dnsEndpoints(st, container.NetworkSettings.Networks)...)
 		}
-		if err := r.registerDNS(nfc, logger, container.ID, contName, rulesCfg, states, endpoints); err != nil {
+		if err := r.registerDNS(nfc, container.ID, contName, rulesCfg, states, endpoints); err != nil {
 			return fmt.Errorf("error setting up DNS filtering: %w", err)
 		}
 	}
@@ -1311,7 +1313,8 @@ func createNFTRule(nfc firewallClient, inbound, inversePortOffsets bool, state u
 		proto = unix.IPPROTO_UDP
 	}
 	exprs := make([]expr.Any, 0, 15)
-	if domainSet != nil {
+	switch {
+	case domainSet != nil:
 		if len(addr) != 0 {
 			exprs = append(exprs, matchAddrExprs(addr, addrOffset)...)
 		}
@@ -1320,7 +1323,7 @@ func createNFTRule(nfc firewallClient, inbound, inversePortOffsets bool, state u
 		if state&stateNew != 0 && !inversePortOffsets {
 			exprs = append(exprs, getAddrExprN(cfgAddrOffset, fam.addrLen), matchFromNamedSetExpr(domainSet))
 		}
-	} else if len(cfg.IPs) != 0 {
+	case len(cfg.IPs) != 0:
 		var addrExprs []expr.Any
 		if len(addr) != 0 {
 			addrExprs = matchAddrExprs(addr, addrOffset)
@@ -1336,7 +1339,7 @@ func createNFTRule(nfc firewallClient, inbound, inversePortOffsets bool, state u
 			exprs = append(exprs, addrExprs...)
 			exprs = append(exprs, cfgAddrExprs...)
 		}
-	} else if len(addr) != 0 {
+	case len(addr) != 0:
 		exprs = append(exprs, matchAddrExprs(addr, addrOffset)...)
 	}
 

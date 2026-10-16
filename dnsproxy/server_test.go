@@ -20,7 +20,6 @@ import (
 type fakeUpstream struct {
 	addr    string
 	queries atomic.Int32
-	srv     *dns.Server
 }
 
 func newFakeUpstream(t *testing.T, handler func(w dns.ResponseWriter, req *dns.Msg)) *fakeUpstream {
@@ -45,13 +44,13 @@ func newFakeUpstream(t *testing.T, handler func(w dns.ResponseWriter, req *dns.M
 	tcpStarted := make(chan struct{})
 	udp := &dns.Server{PacketConn: pc, Handler: h, NotifyStartedFunc: func() { close(udpStarted) }}
 	tcp := &dns.Server{Listener: ln, Handler: h, NotifyStartedFunc: func() { close(tcpStarted) }}
-	go udp.ActivateAndServe()
-	go tcp.ActivateAndServe()
+	go func() { _ = udp.ActivateAndServe() }()
+	go func() { _ = tcp.ActivateAndServe() }()
 	<-udpStarted
 	<-tcpStarted
 	t.Cleanup(func() {
-		udp.Shutdown()
-		tcp.Shutdown()
+		_ = udp.Shutdown()
+		_ = tcp.Shutdown()
 	})
 
 	return f
@@ -97,7 +96,11 @@ func freeAddr(t *testing.T, ip string) netip.AddrPort {
 		t.Skipf("can't listen on %s: %v", ip, err)
 	}
 	defer pc.Close()
-	port := pc.LocalAddr().(*net.UDPAddr).Port
+	udpAddr, ok := pc.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("unexpected address type %T", pc.LocalAddr())
+	}
+	port := udpAddr.Port
 	return netip.AddrPortFrom(netip.MustParseAddr(ip), uint16(port))
 }
 
@@ -148,6 +151,8 @@ func newServer(t *testing.T, up *fakeUpstream, minTTL time.Duration) (*Server, n
 }
 
 func zoneHandler(t *testing.T, records map[string][]string) func(dns.ResponseWriter, *dns.Msg) {
+	t.Helper()
+
 	return func(w dns.ResponseWriter, req *dns.Msg) {
 		resp := new(dns.Msg)
 		resp.SetReply(req)
@@ -163,7 +168,7 @@ func zoneHandler(t *testing.T, records map[string][]string) func(dns.ResponseWri
 				resp.Answer = append(resp.Answer, r)
 			}
 		}
-		w.WriteMsg(resp)
+		_ = w.WriteMsg(resp)
 	}
 }
 
@@ -283,7 +288,7 @@ func TestCNAMEChain(t *testing.T) {
 			resp.Answer = append(resp.Answer, rr(t, s))
 		}
 		resp.Extra = append(resp.Extra, rr(t, "glue.example. 30 IN A 10.7.7.7"))
-		w.WriteMsg(resp)
+		_ = w.WriteMsg(resp)
 	})
 	s, addr := newServer(t, up2, 10*time.Second)
 
@@ -425,7 +430,7 @@ func TestTruncatedUDPRetriesOverTCP(t *testing.T) {
 		} else {
 			resp.Answer = append(resp.Answer, rr(t, "a.corp.test. 60 IN A 10.0.0.1"))
 		}
-		w.WriteMsg(resp)
+		_ = w.WriteMsg(resp)
 	})
 	s, addr := newServer(t, up, time.Second)
 
@@ -447,7 +452,7 @@ func TestUpstreamFailover(t *testing.T) {
 	bad := newFakeUpstream(t, func(w dns.ResponseWriter, req *dns.Msg) {
 		resp := new(dns.Msg)
 		resp.SetRcode(req, dns.RcodeServerFailure)
-		w.WriteMsg(resp)
+		_ = w.WriteMsg(resp)
 	})
 	good := newFakeUpstream(t, zoneHandler(t, map[string][]string{
 		"a.corp.test.": {"a.corp.test. 60 IN A 10.0.0.1"},

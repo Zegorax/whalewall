@@ -129,7 +129,7 @@ func (s *server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	resp.Authoritative = true
 	if len(req.Question) != 1 {
 		resp.Rcode = dns.RcodeFormatError
-		w.WriteMsg(resp)
+		_ = w.WriteMsg(resp)
 		return
 	}
 
@@ -138,11 +138,11 @@ func (s *server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	name := strings.ToLower(strings.TrimSuffix(q.Name, "."))
 	if _, ok := s.zone.lookup(name); !ok {
 		resp.Rcode = dns.RcodeNameError
-		w.WriteMsg(resp)
+		_ = w.WriteMsg(resp)
 		return
 	}
 	s.answer(resp, name, q.Qtype, 0)
-	w.WriteMsg(resp)
+	_ = w.WriteMsg(resp)
 }
 
 func main() {

@@ -18,7 +18,6 @@ func main() {
 
 	errCh := make(chan error, 4)
 	for _, port := range strings.Split(*ports, ",") {
-		port := port
 		mux := http.NewServeMux()
 		mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 			fmt.Fprintf(w, "hello from %s on port %s\n", *name, port)
@@ -27,7 +26,9 @@ func main() {
 		mux.HandleFunc("/slow", func(w http.ResponseWriter, _ *http.Request) {
 			for i := 1; i <= 8; i++ {
 				fmt.Fprintf(w, "tick %d\n", i)
-				w.(http.Flusher).Flush()
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
 				time.Sleep(time.Second)
 			}
 		})

@@ -142,7 +142,7 @@ func (r *RuleManager) createDomainRules(nfc firewallClient, logger *zap.Logger, 
 }
 
 // cleanupDomainState removes the sets created for a container.
-func (r *RuleManager) cleanupDomainState(nfc firewallClient, logger *zap.Logger, id string, st *famState) {
+func (r *RuleManager) cleanupDomainState(nfc firewallClient, logger *zap.Logger, st *famState) {
 	for _, set := range st.domainSets {
 		nfc.DelSet(set)
 		if err := ignoringErr(nfc.Flush, syscall.ENOENT); err != nil {
@@ -211,7 +211,7 @@ func createDNATRules(fam *family, id string, contAddr, gateway []byte, port uint
 		nfproto = unix.NFPROTO_IPV6
 	}
 
-	var rules []*nftables.Rule
+	rules := make([]*nftables.Rule, 0, 2)
 	for _, proto := range []int{unix.IPPROTO_UDP, unix.IPPROTO_TCP} {
 		exprs := matchAddrExprs(contAddr, fam.srcOffset)
 		exprs = append(exprs, matchProtoExprs(proto)...)
@@ -263,7 +263,7 @@ type dnsEndpoint struct {
 // dnsEndpoints returns the resolver address for every address of the
 // container.
 func dnsEndpoints(st *famState, networks map[string]*network.EndpointSettings) []dnsEndpoint {
-	var eps []dnsEndpoint
+	eps := make([]dnsEndpoint, 0, len(st.addrs))
 	for netName, contAddr := range st.addrs {
 		settings := networks[netName]
 		if settings == nil {
@@ -318,7 +318,7 @@ func (r *RuleManager) createDNSAccessRules(nfc firewallClient, logger *zap.Logge
 // registerDNS makes the resolver answer queries of a container
 // according to its domain rules, and redirects the container's DNS
 // traffic to it.
-func (r *RuleManager) registerDNS(nfc firewallClient, logger *zap.Logger, id, name string, cfg config, states []*famState, endpoints []dnsEndpoint) error {
+func (r *RuleManager) registerDNS(nfc firewallClient, id, name string, cfg config, states []*famState, endpoints []dnsEndpoint) error {
 	if !hasDomainRules(cfg) {
 		return nil
 	}

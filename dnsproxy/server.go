@@ -375,7 +375,7 @@ func (s *Server) exchange(ctx context.Context, network, upstream string, req *dn
 func (s *Server) filterAnswer(resp *dns.Msg, qname string) []Resolved {
 	owners := map[string]bool{strings.ToLower(qname): true}
 	// follow CNAMEs; the answer is usually ordered but don't rely on it
-	for i := 0; i < maxCNAMEChain; i++ {
+	for range maxCNAMEChain {
 		grew := false
 		for _, rr := range resp.Answer {
 			cname, ok := rr.(*dns.CNAME)
@@ -394,7 +394,7 @@ func (s *Server) filterAnswer(resp *dns.Msg, qname string) []Resolved {
 	}
 
 	var (
-		resolved []Resolved
+		resolved = make([]Resolved, 0, len(resp.Answer))
 		answer   = make([]dns.RR, 0, len(resp.Answer))
 	)
 	for _, rr := range resp.Answer {
