@@ -8,6 +8,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -56,6 +57,10 @@ var (
 		Kind: expr.VerdictDrop,
 	}
 )
+
+// errInvalidRules marks errors caused by the rules a user wrote, which
+// result in the container being isolated.
+var errInvalidRules = errors.New("invalid rules")
 
 // createRules adds nftables rules for started containers.
 func (r *RuleManager) createRules(ctx context.Context) {
@@ -116,10 +121,19 @@ func containerAddrs(networks map[string]*network.EndpointSettings, contName stri
 
 // parseRules parses and validates the rules of a container.
 func (r *RuleManager) parseRules(cfg string, container types.ContainerJSON, rulesCfg *config) error {
+	if len(cfg) > maxRulesLabelSize {
+		return fmt.Errorf("rules are larger than %d bytes", maxRulesLabelSize)
+	}
 	dec := yaml.NewDecoder(strings.NewReader(cfg))
 	dec.KnownFields(true)
 	if err := dec.Decode(rulesCfg); err != nil {
 		return fmt.Errorf("error parsing rules: %w", err)
+	}
+	// a second document would be ignored, which is surprising enough to
+	// refuse
+	var extra yaml.Node
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("rules must be a single YAML document")
 	}
 	if err := validateConfig(*rulesCfg); err != nil {
 		return fmt.Errorf("error validating rules: %w", err)
@@ -158,6 +172,14 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 	if len(container.NetworkSettings.Networks) == 1 {
 		if _, ok := container.NetworkSettings.Networks[hostNetworkName]; ok {
 			return fmt.Errorf("container %q is using host networking, rules cannot be created for it", contName)
+		}
+	}
+
+	for _, w := range capabilityWarnings(container.HostConfig) {
+		if w.severe {
+			logger.Warn(w.msg)
+		} else {
+			logger.Info(w.msg)
 		}
 	}
 
@@ -357,7 +379,28 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 	estContainers := make(map[string]struct{})
 	if configExists {
 		if err := r.populateOutputRules(ctx, tx, rulesCfg, container.ID, project, allNets, estContainers); err != nil {
-			return fmt.Errorf("error validating rules: %w", err)
+			if !errors.Is(err, errInvalidRules) {
+				return fmt.Errorf("error validating rules: %w", err)
+			}
+			// Isolate the container completely like for other invalid
+			// rules instead of leaving its drop chain behind without
+			// the container being known. Anything written for the
+			// rules before the error is discarded.
+			logger.Error("invalid rules, all traffic of the container is dropped", zap.Error(err))
+			_ = tx.Rollback()
+			tx, err = r.db.Begin(ctx, logger)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+			if isNew {
+				if err := tx.AddContainer(ctx, container.ID, contName); err != nil {
+					return fmt.Errorf("error adding container to database: %w", err)
+				}
+			}
+			clear(estContainers)
+			configExists = false
+			rulesCfg = config{}
 		}
 	}
 
@@ -555,7 +598,8 @@ func (r *RuleManager) populateOutputRules(ctx context.Context, tx database.TX, c
 		// ensure the specified network exists
 		if ruleCfg.Network != "" {
 			if _, _, ok := findNetwork(ruleCfg.Network, project, addrs); !ok {
-				return fmt.Errorf("output rule #%d: network %q not found",
+				return fmt.Errorf("%w: output rule #%d: network %q not found",
+					errInvalidRules,
 					i,
 					ruleCfg.Network,
 				)
@@ -584,7 +628,8 @@ func (r *RuleManager) populateOutputRules(ctx context.Context, tx database.TX, c
 						return fmt.Errorf("error parsing container %q label: %w", cont.ID[:12], err)
 					}
 					if !enabled {
-						return fmt.Errorf("output rule #%d: container %q does not have whalewall enabled",
+						return fmt.Errorf("%w: output rule #%d: container %q does not have whalewall enabled",
+							errInvalidRules,
 							i,
 							ruleCfg.Container,
 						)
@@ -594,7 +639,8 @@ func (r *RuleManager) populateOutputRules(ctx context.Context, tx database.TX, c
 				dstProject := cont.Config.Labels[composeProjectLabel]
 				dstNetName, dstNetwork, ok := findNetwork(ruleCfg.Network, dstProject, cont.NetworkSettings.Networks)
 				if !ok {
-					return fmt.Errorf("output rule #%d: network %q not found for container %q",
+					return fmt.Errorf("%w: output rule #%d: network %q not found for container %q",
+						errInvalidRules,
 						i,
 						ruleCfg.Network,
 						ruleCfg.Container,

@@ -87,6 +87,8 @@ func mainRetCode() int {
 		}
 	}
 
+	checkKernelSettings(logger)
+
 	// create rule manager and drop unneeded privileges
 	dataDirAbs, err := filepath.Abs(*dataDir)
 	if err != nil {

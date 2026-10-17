@@ -181,6 +181,12 @@ func newServer(t *testing.T, up *fakeUpstream, minTTL time.Duration) (*Server, n
 		MinTTL:    minTTL,
 		Grace:     time.Second,
 		Timeout:   time.Second,
+		// the limits have their own tests, the others make many
+		// requests from a single address
+		QueryRate:            100000,
+		QueryBurst:           100000,
+		MaxInflight:          100000,
+		MaxTCPConnsPerSource: 400,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -550,6 +556,9 @@ func TestListenerRefcount(t *testing.T) {
 	s, err := New(zaptest.NewLogger(t), Config{Upstreams: []string{up.addr}})
 	is.NoErr(err)
 	addr := freeAddr(t, "127.0.0.1")
+
+	// connections of sources without a policy are closed
+	registerLoopback(s, &Policy{Name: clientName, Match: matchSuffix(policyZone), Allow: (&recorder{}).allow})
 
 	is.NoErr(s.Acquire(addr))
 	is.NoErr(s.Acquire(addr))

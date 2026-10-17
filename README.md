@@ -6,6 +6,12 @@ Automate management of firewall rules for Docker containers.
 
 Linux with a recent kernel, around 5.10 or newer.
 
+Filtering traffic between containers on the same Docker network needs the `br_netfilter` kernel
+module (`modprobe br_netfilter`, `net.bridge.bridge-nf-call-iptables=1`); without it that traffic
+never reaches the firewall. Connection tracking helpers should be off
+(`net.netfilter.nf_conntrack_helper=0`, the default), they can open connections that rules did not
+allow. Whalewall checks both when it starts and logs a warning if they are wrong.
+
 ## Purpose
 
 Docker by default creates iptables rules to handle container traffic that override almost all user-set
@@ -347,10 +353,24 @@ point at the host (DNS rebinding). If nothing is left the container gets an empt
 - Queries that are not class IN, zone transfers (AXFR/IXFR), ANY queries and names with unusual
 characters are refused. Look-alike names (other-case Unicode, trailing dots, embedded NULs) never match.
 
+Resource limits keep one container from exhausting the resolver or whalewall: at most 100 queries per
+second (bursts of 200), 32 queries waiting for the upstream and 16 open TCP connections per container.
+Queries over the limit are dropped, connections from addresses that aren't managed containers are closed
+at once, and log lines caused by a single container are sampled. A rules label larger than 64 KiB, with
+more than 256 rules or 4096 addresses, domains and ports, or with more than one YAML document is invalid.
+
+Invalid rules, for any reason, isolate the container completely instead of leaving it unmanaged. This
+includes a `container` rule that names a container which does not have `whalewall.enabled` set.
+
 Known limitations: another container on the same bridge can be reached if an allowed name resolves to
-its address; a container with `NET_RAW` can spoof the source address of another container on the same
-bridge; networks connected to a container after it started are not managed; a privileged container can
-change its own network configuration.
+its address; networks connected to a container after it started are not managed.
+
+Capabilities: whalewall cannot stop a container from changing the addresses it sends from. A container
+that keeps `NET_RAW` (a Docker default) can forge the source address of another container on its
+network, so it can use that container's rules; a container with `NET_ADMIN`, `SYS_ADMIN` or
+`privileged` can change its own network configuration. Drop `NET_RAW` for managed containers
+(`cap_drop: [NET_RAW]` in compose) and don't grant the others; whalewall logs a message for each
+container that keeps one of these capabilities.
 
 ### IPv6
 

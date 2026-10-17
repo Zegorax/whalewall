@@ -320,7 +320,26 @@ func (p rulePorts) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	return nil
 }
 
+const (
+	// maxRulesLabelSize, maxRules and maxEntries keep a container's
+	// rules from using unreasonable amounts of memory and CPU in
+	// whalewall and the kernel; real configs are far below them.
+	maxRulesLabelSize = 64 << 10
+	maxRules          = 256
+	maxEntries        = 4096
+)
+
 func validateConfig(c config) error {
+	if len(c.Output) > maxRules {
+		return fmt.Errorf("more than %d output rules", maxRules)
+	}
+	entries := 0
+	for _, r := range c.Output {
+		entries += len(r.IPs) + len(r.Domains) + len(r.SrcPorts) + len(r.DstPorts)
+	}
+	if entries > maxEntries {
+		return fmt.Errorf("more than %d addresses, domains and ports in total", maxEntries)
+	}
 	for i, r := range c.Output {
 		err := validateRule(r)
 		if err != nil {

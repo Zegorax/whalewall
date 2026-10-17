@@ -32,6 +32,7 @@ setup() {
 	CGO_ENABLED=0 go build -buildvcs=true -o "$WW" ./cmd/whalewall || exit 1
 	CGO_ENABLED=0 go build -o "$ROOT/e2e/bin/fakedns" ./e2e/tools/fakedns || exit 1
 	CGO_ENABLED=0 go build -o "$ROOT/e2e/bin/web" ./e2e/tools/web || exit 1
+	CGO_ENABLED=0 go build -o "$ROOT/e2e/bin/attack" ./e2e/tools/attack || exit 1
 	docker image inspect "$IMG" >/dev/null 2>&1 || docker pull -q "$IMG" >/dev/null || exit 1
 
 	cat >"$OUT/zone.txt" <<EOF
@@ -819,6 +820,269 @@ s30() {
 	sc_end
 }
 
+s31() {
+	sc_begin 31 source-spoofing "Forged source addresses: a known limitation with NET_RAW, closed by dropping it"
+	local mount=(-v "$ROOT/e2e/bin:/e2e:ro")
+	start_client sp-vip 10.99.0.81 'output:
+  - ips: ["10.99.0.20"]
+    proto: udp
+    dst_ports: [9999]' "${mount[@]}"
+	start_client sp-atk 10.99.0.80 "$(rules '["a.corp.test"]')" --dns "$DUMMY_DNS" "${mount[@]}"
+	start_client sp-safe 10.99.0.82 "$(rules '["a.corp.test"]')" --dns "$DUMMY_DNS" --cap-drop NET_RAW "${mount[@]}"
+
+	udp_listen() {
+		docker exec web-b sh -c 'killall nc 2>/dev/null; rm -f /tmp/udp.out' >/dev/null 2>&1
+		docker exec -d web-b sh -c 'nc -u -l -p 9999 > /tmp/udp.out'
+		sleep 0.5
+	}
+	udp_got() { sleep 1; cexec web-b "cat /tmp/udp.out 2>/dev/null"; }
+
+	say "baseline: the container that is allowed to send UDP to web-b can"
+	udp_listen
+	cexec sp-vip "echo from-vip | nc -u -w 1 10.99.0.20 9999"
+	udp_got
+	assert_contains "from-vip" "an allowed UDP packet arrives"
+
+	say "the attacker is not allowed to"
+	udp_listen
+	cexec sp-atk "echo from-atk | nc -u -w 1 10.99.0.20 9999"
+	udp_got
+	assert_not_contains "from-atk" "a plain UDP packet of the attacker is dropped"
+
+	say "binding to another container's address is not possible without extra capabilities"
+	udp_listen
+	cexec sp-atk "echo bound | nc -u -w 1 -s 10.99.0.81 10.99.0.20 9999"
+	assert_fail "nc can not bind to an address the container does not have"
+	cexec sp-atk "ip addr add 10.99.0.81/24 dev eth0"
+	assert_fail "the container can not add the address to its interface"
+
+	say "KNOWN LIMITATION: with NET_RAW (a default Docker capability) a raw socket can forge the source address of another container"
+	udp_listen
+	cexec sp-atk "/e2e/attack spoof -src 10.99.0.81 -dst 10.99.0.20 -port 9999 -msg spoofed-as-vip"
+	udp_got
+	assert_contains "spoofed-as-vip" "the forged packet is accepted as if it came from the allowed container"
+	say "whalewall tells the administrator about this: see the log line below"
+	ww_log_excerpt 'can forge source addresses.*sp-atk' 1
+	assert_contains "NET_RAW" "whalewall warns that the container keeps NET_RAW"
+
+	say "the fix is to drop NET_RAW, in compose: cap_drop: [NET_RAW]"
+	udp_listen
+	cexec sp-safe "/e2e/attack spoof -src 10.99.0.81 -dst 10.99.0.20 -port 9999 -msg spoofed-as-vip2"
+	assert_contains "raw socket not allowed" "a container without NET_RAW can not open a raw socket"
+	udp_got
+	assert_not_contains "spoofed-as-vip2" "nothing arrives"
+	rm_containers sp-vip sp-atk sp-safe
+	sc_end
+}
+
+s32() {
+	sc_begin 32 stale-allowance "An address allowed through a container rule is not usable after that container is gone"
+	local mount=(-v "$ROOT/e2e/bin:/e2e:ro")
+	docker rm -f st-srv st-other >/dev/null 2>&1
+
+	say "a container rule needs the target to be managed; if it is not, the rules are invalid and the container is isolated"
+	run docker run -d --name st-srv --network "$NET" --ip 10.99.0.150 "${mount[@]}" --entrypoint /e2e/web "$IMG" -name st-srv
+	start_client st-bad 10.99.0.153 "output:
+  - network: $NET
+    container: st-srv
+    proto: tcp
+    dst_ports: [8080]"
+	ww_log_excerpt 'does not have whalewall enabled' 1
+	assert_contains "does not have whalewall enabled" "whalewall rejects a container rule for an unmanaged target"
+	curl_in st-bad "http://10.99.0.150:8080/"
+	assert_fail "the container with the invalid rule can not reach the target"
+	curl_in st-bad "$WEBA"
+	assert_fail "and is isolated from everything else, not left unmanaged"
+	rm_containers st-srv st-bad
+
+	say "the usual case, both managed"
+	run docker run -d --name st-srv --network "$NET" --ip 10.99.0.150 -l whalewall.enabled=true "${mount[@]}" --entrypoint /e2e/web "$IMG" -name st-srv
+	wait_rules st-srv
+	start_client st-cli 10.99.0.151 "output:
+  - network: $NET
+    container: st-srv
+    proto: tcp
+    dst_ports: [8080]"
+	curl_in st-cli "http://10.99.0.150:8080/"
+	assert_contains "hello from st-srv" "the container rule lets st-cli reach st-srv"
+	curl_in st-cli "$WEBA"
+	assert_fail "st-cli can not reach anything else"
+	say "st-srv is removed and its address goes to an unrelated container"
+	rm_containers st-srv
+	sleep 2
+	run docker run -d --name st-other --network "$NET" --ip 10.99.0.150 "${mount[@]}" --entrypoint /e2e/web "$IMG" -name st-other
+	sleep 1
+	curl_in st-cli "http://10.99.0.150:8080/"
+	assert_not_contains "hello from st-other" "the new owner of the address is not reachable through the old rule"
+	say "a container with the allowed name comes back, the rule applies to it again"
+	rm_containers st-other
+	sleep 1
+	run docker run -d --name st-srv --network "$NET" --ip 10.99.0.152 -l whalewall.enabled=true "${mount[@]}" --entrypoint /e2e/web "$IMG" -name st-srv
+	wait_rules st-srv
+	sleep 2
+	curl_in st-cli "http://10.99.0.152:8080/"
+	assert_contains "hello from st-srv" "the rule follows the container by name"
+	curl_in st-cli "http://10.99.0.150:8080/"
+	assert_fail "the old address stays closed"
+	rm_containers st-srv st-cli
+	sc_end
+}
+
+s33() {
+	sc_begin 33 published-ports "Published ports are not a way around the rules"
+	docker rm -f pub >/dev/null 2>&1
+	run docker run -d --name pub --network "$NET" --ip 10.99.0.160 -p 18080:8080 -v "$ROOT/e2e/bin:/e2e:ro" --entrypoint /e2e/web "$IMG" -name pub
+	local hostip
+	hostip=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1)
+	say "host address used: ${hostip:-none}"
+	start_plain pl2 10.99.0.162
+	cexec pl2 "curl -sS -m 4 --connect-timeout 2 http://$GW4:18080/"
+	local reachable=$LAST_RC
+	start_client hp2 10.99.0.161 "$(rules '["a.corp.test"]')" --dns "$DUMMY_DNS"
+	if [ "$reachable" != 0 ]; then
+		say "this host does not forward published ports to containers on the gateway address, nothing to attack"
+	else
+		assert_contains "hello from pub" "an unmanaged container can use the published port (the path exists)"
+		curl_in hp2 "http://$GW4:18080/"
+		assert_fail "a managed container can not reach pub through the published port on the gateway"
+		if [ -n "$hostip" ]; then
+			curl_in hp2 "http://$hostip:18080/"
+			assert_fail "a managed container can not reach pub through the published port on the host address"
+		fi
+	fi
+	curl_in hp2 "http://10.99.0.160:8080/"
+	assert_fail "a managed container can not reach pub directly either"
+	rm_containers pub pl2 hp2
+	sc_end
+}
+
+s34() {
+	sc_begin 34 resolver-exposure "The resolver is not an open resolver and does not hold connections for unmanaged hosts"
+	local mount=(-v "$ROOT/e2e/bin:/e2e:ro")
+	start_plain rx 10.99.0.170 "${mount[@]}"
+	say "the resolver listens while a container with domain rules exists on the network"
+	start_client rx-anchor 10.99.0.171 "$(rules '["a.corp.test"]')" --dns "$DUMMY_DNS"
+	cexec rx "nslookup -port=5353 a.corp.test $GW4"
+	assert_not_contains "10.99.0.10" "an unmanaged container gets no answer from the resolver"
+	ww_log_excerpt 'refusing query from unmanaged source' 1
+	assert_contains "unmanaged source" "whalewall logs the refused query"
+	cexec rx "/e2e/attack hold -server $GW4:5353 -n 50 -for 2s"
+	assert_contains "alive=0" "the resolver closes every TCP connection of an unmanaged container"
+	assert_not_contains "opened=0" "the connections were accepted and then closed, so the check measured something"
+	say "queries for names that are not allowed never reach the upstream"
+	local before after
+	before=$(fakedns_queries evil.other.test)
+	cexec rx "nslookup -port=5353 evil.other.test $GW4"
+	after=$(fakedns_queries evil.other.test)
+	assert_eq "$after" "$before" "the unmanaged query did not reach the upstream"
+	rm_containers rx rx-anchor
+	sc_end
+}
+
+s35() {
+	sc_begin 35 dns-flood "A container can not exhaust the resolver or whalewall by flooding it"
+	local mount=(-v "$ROOT/e2e/bin:/e2e:ro")
+	start_client fl 10.99.0.180 "$(rules '["**.corp.test"]')" --dns "$DUMMY_DNS" "${mount[@]}"
+	start_client fl2 10.99.0.181 "$(rules '["**.corp.test"]')" --dns "$DUMMY_DNS"
+	local fds_before fds_after q_before q_after
+	hostsh "ls /proc/$WW_PID/fd | wc -l"
+	fds_before=$LAST_OUT
+	q_before=$(fakedns_queries a.corp.test)
+	say "3000 queries from 100 senders and 300 idle TCP connections"
+	cexec fl "/e2e/attack flood -server $DUMMY_DNS:53 -name a.corp.test. -n 3000 -workers 100 -tcp 300"
+	local out=$LAST_OUT answered alive
+	answered=$(echo "$out" | sed -n 's/.*answered=\([0-9]*\).*/\1/p')
+	alive=$(echo "$out" | sed -n 's/.*tcp_alive=\([0-9]*\).*/\1/p')
+	log "answered=$answered alive=$alive"
+	local seconds max
+	seconds=$(echo "$out" | sed -n 's/.*seconds=\([0-9]*\).*/\1/p')
+	# 100 queries per second on average and a burst of 200, with some room
+	max=$((250 + 110 * ${seconds:-1}))
+	if [ "${answered:-99999}" -le "$max" ] && [ "${answered:-0}" -gt 0 ]; then pass "the flood was limited to $answered answers in ${seconds}s (limit $max)"; else fail "flood answered: $answered in ${seconds}s (limit $max)"; fi
+	q_after=$(fakedns_queries a.corp.test)
+	if [ $((q_after - q_before)) -le "$max" ]; then pass "the upstream saw $((q_after - q_before)) queries"; else fail "the upstream saw $((q_after - q_before)) queries"; fi
+	say "idle TCP connections: a container can keep at most 16 open"
+	cexec fl "/e2e/attack hold -server $DUMMY_DNS:53 -n 100 -for 1s"
+	alive=$(echo "$LAST_OUT" | sed -n 's/.*alive=\([0-9]*\).*/\1/p')
+	if [ "${alive:-999}" -le 16 ] && [ "${alive:-0}" -gt 0 ]; then pass "$alive of 100 idle TCP connections stayed open"; else fail "idle TCP connections kept open: $alive"; fi
+	hostsh "ls /proc/$WW_PID/fd | wc -l"
+	fds_after=$LAST_OUT
+	if [ "$fds_after" -le $((fds_before + 40)) ]; then pass "file descriptors of whalewall: $fds_before before, $fds_after after"; else fail "file descriptors of whalewall: $fds_before before, $fds_after after"; fi
+	cexec fl2 "nslookup a.corp.test"
+	assert_contains "10.99.0.10" "another container still resolves names"
+	hostsh "kill -0 $WW_PID && echo whalewall is running"
+	assert_contains "whalewall is running" "whalewall survived the flood"
+	ww_log_excerpt 'rate limiting DNS queries' 1
+	assert_contains "rate limiting" "the limit was logged"
+	say "log lines are sampled, the flood did not write thousands of lines"
+	hostsh "grep -c 'rate limiting DNS queries' $OUT/whalewall.log"
+	if [ "$LAST_OUT" -lt 100 ]; then pass "$LAST_OUT rate limit log lines"; else fail "$LAST_OUT rate limit log lines"; fi
+	rm_containers fl fl2
+	sc_end
+}
+
+s36() {
+	sc_begin 36 hostile-labels "Rule labels made to exhaust whalewall isolate the container and leave whalewall working"
+	local bomb big
+	bomb='a: &a [x,x,x,x,x,x,x,x,x]
+b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]
+c: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b]
+d: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c]
+e: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d]
+f: &f [*e,*e,*e,*e,*e,*e,*e,*e,*e]
+g: &g [*f,*f,*f,*f,*f,*f,*f,*f,*f]
+h: &h [*g,*g,*g,*g,*g,*g,*g,*g,*g]
+output:
+  - ips: *h
+    proto: tcp
+    dst_ports: [8080]'
+	start_client hb1 10.99.0.190 "$bomb" --dns "$DUMMY_DNS"
+	ww_log_excerpt 'invalid rules.*hb1' 1
+	assert_contains "invalid rules" "an alias bomb is rejected"
+	curl_in hb1 "$WEBA"
+	assert_fail "the container is isolated"
+
+	big=$(head -c 70000 /dev/zero | tr '\0' x)
+	start_client hb2 10.99.0.191 "# $big
+$(rules '["a.corp.test"]')" --dns "$DUMMY_DNS"
+	ww_log_excerpt 'invalid rules.*hb2' 1
+	assert_contains "larger than" "an oversized label is rejected"
+	curl_in hb2 "$WEBA"
+	assert_fail "the container is isolated"
+
+	start_client hb3 10.99.0.192 "$(rules '["a.corp.test"]')
+---
+output:
+  - ips: [0.0.0.0/0]
+    proto: tcp
+    dst_ports: [1-65535]" --dns "$DUMMY_DNS"
+	ww_log_excerpt 'invalid rules.*hb3' 1
+	assert_contains "single YAML document" "a second YAML document is rejected"
+	curl_in hb3 "$WEBB"
+	assert_fail "the container is isolated"
+
+	say "whalewall still manages new containers right away"
+	start_client hb4 10.99.0.193 "$(rules '["a.corp.test"]')" --dns "$DUMMY_DNS"
+	curl_in hb4 "http://a.corp.test:8080/"
+	assert_contains "hello from web-a" "a well formed container works"
+	hostsh "kill -0 $WW_PID && echo whalewall is running"
+	assert_contains "whalewall is running" "whalewall is running"
+	rm_containers hb1 hb2 hb3 hb4
+	sc_end
+}
+
+s37() {
+	sc_begin 37 host-settings "Host settings the filtering depends on are checked"
+	hostsh "cat /proc/sys/net/bridge/bridge-nf-call-iptables"
+	assert_contains "1" "bridge-nf-call-iptables is 1, so traffic between containers is filtered"
+	hostsh "cat /proc/sys/net/netfilter/nf_conntrack_helper 2>/dev/null || echo 0"
+	assert_eq "$LAST_OUT" 0 "connection tracking helpers are off"
+	say "whalewall does not warn when the settings are right"
+	hostsh "grep -c 'br_netfilter kernel module is not loaded\|nf_conntrack_helper is 1' $OUT/whalewall.log"
+	assert_eq "$LAST_OUT" 0 "no kernel setting warnings in the log"
+	sc_end
+}
+
 s23() {
 	sc_begin 23 clear "whalewall -clear removes everything it created"
 	rm_containers $(docker ps -aq --filter label=whalewall.enabled=true) 2>/dev/null
@@ -841,7 +1105,7 @@ s23() {
 # ----------------------------------------------------------------- main
 
 setup
-for n in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 24 25 26 27 28 29 30 23; do
+for n in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 24 25 26 27 28 29 30 31 32 33 34 35 36 37 23; do
 	want "$n" && "s$n"
 done
 

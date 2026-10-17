@@ -75,6 +75,16 @@ type Config struct {
 	MaxTTL time.Duration
 	// Timeout is the timeout of a single upstream exchange.
 	Timeout time.Duration
+	// QueryRate is the number of queries per second a container can
+	// make on average, QueryBurst how many it can make at once.
+	QueryRate  float64
+	QueryBurst int
+	// MaxInflight is the number of queries of a container that can be
+	// waiting for an upstream at the same time.
+	MaxInflight int
+	// MaxTCPConnsPerSource is the number of TCP connections a container
+	// can hold open.
+	MaxTCPConnsPerSource int
 }
 
 // Server is a DNS server that can listen on several addresses and
@@ -86,6 +96,13 @@ type Server struct {
 	mtx       sync.RWMutex
 	policies  map[netip.Addr]*Policy
 	listeners map[netip.AddrPort]*listener
+
+	srcMtx       sync.Mutex
+	sources      map[netip.Addr]*sourceState
+	unmanagedLog globalLog
+
+	tcpMtx   sync.Mutex
+	tcpTotal int
 }
 
 type listener struct {
@@ -111,12 +128,25 @@ func New(logger *zap.Logger, cfg Config) (*Server, error) {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = defaultTimeout
 	}
+	if cfg.QueryRate <= 0 {
+		cfg.QueryRate = defaultQueryRate
+	}
+	if cfg.QueryBurst <= 0 {
+		cfg.QueryBurst = defaultQueryBurst
+	}
+	if cfg.MaxInflight <= 0 {
+		cfg.MaxInflight = defaultMaxInflight
+	}
+	if cfg.MaxTCPConnsPerSource <= 0 {
+		cfg.MaxTCPConnsPerSource = defaultMaxTCPConnsPerSource
+	}
 
 	return &Server{
 		cfg:       cfg,
 		logger:    logger.Named("dns"),
 		policies:  make(map[netip.Addr]*Policy),
 		listeners: make(map[netip.AddrPort]*listener),
+		sources:   make(map[netip.Addr]*sourceState),
 	}, nil
 }
 
@@ -152,6 +182,7 @@ func (s *Server) Unregister(addrs []netip.Addr) {
 	for _, a := range addrs {
 		delete(s.policies, a.Unmap())
 	}
+	s.forgetSources(addrs)
 }
 
 func (s *Server) policy(a netip.Addr) (*Policy, bool) {
@@ -200,8 +231,19 @@ func (s *Server) startServer(addr netip.AddrPort, network string) (*dns.Server, 
 		ReadTimeout:       s.cfg.Timeout,
 		WriteTimeout:      s.cfg.Timeout,
 	}
+	if network == netTCP {
+		ln, err := net.Listen(netTCP, addr.String())
+		if err != nil {
+			return nil, err
+		}
+		srv.Listener = &limitedListener{Listener: ln, s: s}
+	}
 	errCh := make(chan error, 1)
 	go func() {
+		if srv.Listener != nil {
+			errCh <- srv.ActivateAndServe()
+			return
+		}
 		errCh <- srv.ListenAndServe()
 	}()
 
@@ -288,9 +330,24 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 	p, ok := s.policy(src)
 	if !ok {
 		// unknown sources are default-deny
-		s.logger.Warn("refusing query from unmanaged source", zap.Stringer("source", src))
+		if s.logOK(src) {
+			s.logger.Warn("refusing query from unmanaged source", zap.Stringer("source", src))
+		}
 		return reply(req, dns.RcodeRefused)
 	}
+	release, ok := s.admit(src)
+	if !ok {
+		// over the limits; UDP queries are dropped, a client that waits
+		// for a TCP answer gets one
+		if s.logOK(src) {
+			s.logger.Warn("rate limiting DNS queries", zap.String("container.name", p.Name))
+		}
+		if w.RemoteAddr().Network() == netUDP {
+			return nil
+		}
+		return reply(req, dns.RcodeRefused)
+	}
+	defer release()
 	if req.Opcode != dns.OpcodeQuery {
 		return reply(req, dns.RcodeNotImplemented)
 	}
@@ -310,19 +367,25 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 	// zone transfers and ANY queries would reveal more than the names a
 	// container is allowed to resolve
 	if q.Qclass != dns.ClassINET || q.Qtype == dns.TypeAXFR || q.Qtype == dns.TypeIXFR || q.Qtype == dns.TypeANY {
-		logger.Warn("refusing unsupported DNS query", zap.String("dns.class", dns.ClassToString[q.Qclass]))
+		if s.logOK(src) {
+			logger.Warn("refusing unsupported DNS query", zap.String("dns.class", dns.ClassToString[q.Qclass]))
+		}
 		return reply(req, dns.RcodeRefused)
 	}
 	// names are matched as ASCII, anything else (the library escapes
 	// non-printable bytes and dots inside labels with a backslash) is not
 	// a name that could have been allowed
 	if strings.ContainsRune(name, '\\') {
-		logger.Warn("denied DNS query with escaped characters")
+		if s.logOK(src) {
+			logger.Warn("denied DNS query with escaped characters")
+		}
 		return reply(req, dns.RcodeNameError)
 	}
 
 	if !p.Match(name) {
-		logger.Warn("denied DNS query")
+		if s.logOK(src) {
+			logger.Warn("denied DNS query")
+		}
 		return reply(req, dns.RcodeNameError)
 	}
 	if q.Qtype == dns.TypeAAAA && !p.HasIPv6 {
