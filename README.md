@@ -355,7 +355,7 @@ characters are refused. Look-alike names (other-case Unicode, trailing dots, emb
 
 Resource limits keep one container from exhausting the resolver or whalewall: at most 100 queries per
 second (bursts of 200), 32 queries waiting for the upstream and 16 open TCP connections per container.
-Queries over the limit are dropped, connections from addresses that aren't managed containers are closed
+One rule can allow at most 4096 addresses at a time; a query that would exceed that fails. Queries over the limit are dropped, connections from addresses that aren't managed containers are closed
 at once, and log lines caused by a single container are sampled. A rules label larger than 64 KiB, with
 more than 256 rules or 4096 addresses, domains and ports, or with more than one YAML document is invalid.
 
@@ -363,7 +363,10 @@ Invalid rules, for any reason, isolate the container completely instead of leavi
 includes a `container` rule that names a container which does not have `whalewall.enabled` set.
 
 Known limitations: another container on the same bridge can be reached if an allowed name resolves to
-its address; networks connected to a container after it started are not managed.
+its address; networks connected to a container after it started are not managed; a container that uses
+the network of another container (`network_mode: container:...` or `service:...`) has no address of its
+own, so it is filtered by the rules of the container whose network it uses, and its own rules are not
+applied (whalewall logs an error for it).
 
 Capabilities: whalewall cannot stop a container from changing the addresses it sends from. A container
 that keeps `NET_RAW` (a Docker default) can forge the source address of another container on its
@@ -379,8 +382,10 @@ Docker's IPv6 firewalling to be enabled (`"ipv6": true` and `"ip6tables": true` 
 Docker 28 or newer) so that Docker creates the `DOCKER-USER` chain for IPv6. If a managed container
 has an IPv6 address and whalewall can't manage IPv6, whalewall logs an error and creates no rules
 for the container. Rules apply to both families: `ips` entries are used in the family they belong to,
-and everything else (ports, domains, containers) applies to both. ICMPv6 neighbor discovery and
-packet too big messages are always allowed for managed containers since IPv6 can't work without them.
+and everything else (ports, domains, containers) applies to both. ICMPv6 neighbor discovery (router
+solicitation, neighbor solicitation and advertisement) and packet too big messages are always allowed for
+managed containers since IPv6 can't work without them. Router advertisements and redirects are not: a
+container could use them to take over the IPv6 routes of the other containers on its network.
 `mapped_ports` rules are only supported for IPv4.
 
 ### Docker environmental variables

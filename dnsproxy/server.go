@@ -174,15 +174,26 @@ func (s *Server) Register(addrs []netip.Addr, p *Policy) {
 	}
 }
 
-// Unregister removes the policy of addrs. Queries from them are refused
-// afterwards.
-func (s *Server) Unregister(addrs []netip.Addr) {
+// Unregister removes policy p from addrs. Queries from them are refused
+// afterwards. Addresses that another policy was registered for in the
+// meantime, which happens when a container's address is reused before the
+// previous container was cleaned up, are left alone.
+func (s *Server) Unregister(addrs []netip.Addr, p *Policy) {
+	if p == nil {
+		return
+	}
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
+	var removed []netip.Addr
 	for _, a := range addrs {
-		delete(s.policies, a.Unmap())
+		a = a.Unmap()
+		if s.policies[a] == p {
+			delete(s.policies, a)
+			removed = append(removed, a)
+		}
 	}
-	s.forgetSources(addrs)
+	s.forgetSources(removed)
 }
 
 func (s *Server) policy(a netip.Addr) (*Policy, bool) {

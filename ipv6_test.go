@@ -82,11 +82,13 @@ func (f *fakeDNS) Register(addrs []netip.Addr, p *dnsproxy.Policy) {
 	}
 }
 
-func (f *fakeDNS) Unregister(addrs []netip.Addr) {
+func (f *fakeDNS) Unregister(addrs []netip.Addr, p *dnsproxy.Policy) {
 	f.mtx.Lock()
 	defer f.mtx.Unlock()
 	for _, a := range addrs {
-		delete(f.policies, a)
+		if f.policies[a] == p {
+			delete(f.policies, a)
+		}
 	}
 }
 
@@ -259,7 +261,8 @@ output:
 	_ = highNet
 
 	expectedV6 := []*nftables.Rule{
-		{Exprs: icmpv6Exprs(133, 137), UserData: []byte(cont1ID)},
+		{Exprs: icmpv6Exprs(133, 133), UserData: []byte(cont1ID)},
+		{Exprs: icmpv6Exprs(135, 136), UserData: []byte(cont1ID)},
 		{Exprs: icmpv6Exprs(2, 2), UserData: []byte(cont1ID)},
 		// 2001:db8::1 tcp/443, the IPv4 address of the same rule is not
 		// part of the IPv6 chain

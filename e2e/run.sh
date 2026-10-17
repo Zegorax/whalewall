@@ -1083,6 +1083,35 @@ s37() {
 	sc_end
 }
 
+s38() {
+	sc_begin 38 shared-network "Containers that share another container's network are filtered by that container's rules"
+	start_client ns-owner 10.99.0.200 "$(rules '["a.corp.test"]')" --dns "$DUMMY_DNS"
+	say "an unmanaged container uses the network of a managed one"
+	docker rm -f ns-side >/dev/null 2>&1
+	run docker run -d --name ns-side --network container:ns-owner --entrypoint sleep "$IMG" infinity
+	curl_in ns-side "http://a.corp.test:8080/"
+	assert_contains "hello from web-a" "the sidecar can reach what the owner is allowed to reach"
+	curl_in ns-side "$WEBB"
+	assert_fail "the sidecar can not reach anything else, it has the owner's address and so its rules"
+	rm_containers ns-side ns-owner
+
+	say "a managed container is limited to web-a by its rules but uses the network of an unmanaged one (Docker does not allow the dns option together with this)"
+	start_plain ns-plain 10.99.0.201
+	docker rm -f ns-bad >/dev/null 2>&1
+	run docker run -d --name ns-bad --network container:ns-plain --entrypoint sleep -l whalewall.enabled=true -l "whalewall.rules=output:
+  - ips: [10.99.0.10]
+    proto: tcp
+    dst_ports: [8080]" "$IMG" infinity
+	sleep 2
+	ww_log_excerpt 'has no network of its own.*ns-bad|ns-bad.*has no network of its own' 1
+	assert_contains "no network of its own" "whalewall reports that the rules of the container can not be applied"
+	say "KNOWN LIMITATION: the rules of ns-bad are not applied, its traffic uses the unmanaged address of ns-plain"
+	curl_in ns-bad "$WEBB"
+	assert_contains "hello from web-b" "ns-bad is not restricted by its own rules"
+	rm_containers ns-bad ns-plain
+	sc_end
+}
+
 s23() {
 	sc_begin 23 clear "whalewall -clear removes everything it created"
 	rm_containers $(docker ps -aq --filter label=whalewall.enabled=true) 2>/dev/null
@@ -1105,7 +1134,7 @@ s23() {
 # ----------------------------------------------------------------- main
 
 setup
-for n in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 24 25 26 27 28 29 30 31 32 33 34 35 36 37 23; do
+for n in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 23; do
 	want "$n" && "s$n"
 done
 

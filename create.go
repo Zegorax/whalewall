@@ -169,6 +169,13 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 	if container.NetworkSettings == nil {
 		return fmt.Errorf("container %q has no network settings", contName)
 	}
+	if len(container.NetworkSettings.Networks) == 0 {
+		mode := ""
+		if container.HostConfig != nil {
+			mode = string(container.HostConfig.NetworkMode)
+		}
+		return fmt.Errorf("container %q has no network of its own (network mode %q); a container that uses another container's network is filtered by the rules of that container, if it has any, and its own rules cannot be applied", contName, mode)
+	}
 	if len(container.NetworkSettings.Networks) == 1 {
 		if _, ok := container.NetworkSettings.Networks[hostNetworkName]; ok {
 			return fmt.Errorf("container %q is using host networking, rules cannot be created for it", contName)
@@ -559,10 +566,15 @@ func createICMPv6Rules(chain *nftables.Chain, id string) []*nftables.Rule {
 	}
 
 	return []*nftables.Rule{
-		// neighbor discovery, types 133-137
+		// Neighbor discovery: router solicitation (133), neighbor
+		// solicitation and advertisement (135, 136). Router
+		// advertisements (134) and redirects (137) are not allowed: a
+		// container could use them to take over the IPv6 configuration
+		// and routes of every other container on the network.
+		newRule(&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{133}}),
 		newRule(
-			&expr.Cmp{Op: expr.CmpOpGte, Register: 1, Data: []byte{133}},
-			&expr.Cmp{Op: expr.CmpOpLte, Register: 1, Data: []byte{137}},
+			&expr.Cmp{Op: expr.CmpOpGte, Register: 1, Data: []byte{135}},
+			&expr.Cmp{Op: expr.CmpOpLte, Register: 1, Data: []byte{136}},
 		),
 		// packet too big
 		newRule(&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{2}}),

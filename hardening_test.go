@@ -3,7 +3,9 @@ package whalewall
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,8 @@ import (
 	"github.com/google/nftables/expr"
 	"github.com/matryer/is"
 	"golang.org/x/sys/unix"
+
+	"github.com/capnspacehook/whalewall/dnsproxy"
 )
 
 // TestIPRulesKeepTheirFamily feeds unusual address, prefix and range
@@ -244,4 +248,112 @@ func TestInvalidContainerRuleIsolatesAndRecordsContainer(t *testing.T) {
 	is.NoErr(env.r.deleteContainerRules(context.Background(), cont1ID, cont1Name))
 	_, err = env.mfc.GetRules(family4.table, chainOf(family4, cont1Name, cont1ID))
 	is.True(err != nil)
+}
+
+// TestRouterAdvertisementsAreNotAllowed checks the ICMPv6 types a managed
+// container's chain accepts. Router advertisements (134) and redirects
+// (137) from a container would let it take over the IPv6 configuration of
+// the other containers on its network.
+func TestRouterAdvertisementsAreNotAllowed(t *testing.T) {
+	t.Parallel()
+
+	allowed := make(map[byte]bool)
+	for _, rule := range createICMPv6Rules(&nftables.Chain{Table: family6.table}, "id") {
+		var low, high byte = 0, 255
+		for _, e := range rule.Exprs {
+			c, ok := e.(*expr.Cmp)
+			if !ok || len(c.Data) != 1 || c.Data[0] == unix.IPPROTO_ICMPV6 {
+				continue
+			}
+			switch c.Op {
+			case expr.CmpOpEq:
+				low, high = c.Data[0], c.Data[0]
+			case expr.CmpOpGte:
+				low = c.Data[0]
+			case expr.CmpOpLte:
+				high = c.Data[0]
+			}
+		}
+		for typ := int(low); typ <= int(high); typ++ {
+			allowed[byte(typ)] = true
+		}
+	}
+
+	for _, typ := range []byte{133, 135, 136, 2} {
+		if !allowed[typ] {
+			t.Errorf("ICMPv6 type %d is not allowed but IPv6 needs it", typ)
+		}
+	}
+	for typ := range 256 {
+		switch byte(typ) {
+		case 2, 133, 135, 136:
+		default:
+			if allowed[byte(typ)] {
+				t.Errorf("ICMPv6 type %d is allowed", typ)
+			}
+		}
+	}
+}
+
+// TestAllowedAddressesPerRuleAreCapped: a wildcard rule lets a container
+// resolve names it controls, each with many addresses. The kernel keeps
+// every one until its TTL ends, so the number must be limited.
+func TestAllowedAddressesPerRuleAreCapped(t *testing.T) {
+	t.Parallel()
+	is := is.New(t)
+
+	env := newIPv6TestEnv(t, true, true)
+	c := dualStackContainer(cont1ID, cont1Name, map[string]string{
+		rulesLabel: `
+output:
+  - domains: ["**.wild.example"]
+    proto: tcp
+    dst_ports: [443]
+  - domains: ["exact.example"]
+    proto: tcp
+    dst_ports: [8443]`,
+	}, []string{dummyDNS})
+	is.NoErr(env.r.createContainerRules(context.Background(), c, true))
+	p := env.dns.policy(cont1Addr)
+	is.True(p != nil)
+
+	next := 0
+	batch := func() []dnsproxy.Resolved {
+		out := make([]dnsproxy.Resolved, 0, 64)
+		for range 64 {
+			next++
+			out = append(out, dnsproxy.Resolved{
+				Addr: netip.AddrFrom4([4]byte{10, byte(next >> 16), byte(next >> 8), byte(next)}),
+				TTL:  time.Hour,
+			})
+		}
+		return out
+	}
+
+	var failedAt int
+	for i := range 200 {
+		if err := p.Allow(context.Background(), "x.wild.example", batch()); err != nil {
+			is.True(errors.Is(err, errTooManyAddrs))
+			failedAt = i
+			break
+		}
+	}
+	is.True(failedAt != 0)                  // the flood was stopped
+	is.True(failedAt*64 <= maxSetAddrs)     // after no more than the limit
+	is.True(failedAt*64 > maxSetAddrs-64*2) // and not long before it
+	env.refresh()
+	set := env.mfc.tables[filterTableName].Sets[domainSetName(cont1ID, 0, family4)]
+	is.True(len(set) <= maxSetAddrs)
+
+	// the other rule has its own budget
+	is.NoErr(p.Allow(context.Background(), "exact.example", batch()))
+
+	// addresses that are already allowed don't count again
+	again := []dnsproxy.Resolved{{Addr: netip.AddrFrom4([4]byte{10, 0, 0, 1}), TTL: time.Hour}}
+	is.NoErr(p.Allow(context.Background(), "x.wild.example", again))
+
+	// a name only opens the rule that lists it
+	env.refresh()
+	exact := env.mfc.tables[filterTableName].Sets[domainSetName(cont1ID, 1, family4)]
+	is.Equal(len(exact), 64)
 }

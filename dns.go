@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sync"
 	"syscall"
 	"time"
 
@@ -66,7 +67,7 @@ type dnsServer interface {
 	Acquire(addr netip.AddrPort) error
 	Release(addr netip.AddrPort)
 	Register(addrs []netip.Addr, p *dnsproxy.Policy)
-	Unregister(addrs []netip.Addr)
+	Unregister(addrs []netip.Addr, p *dnsproxy.Policy)
 	Close()
 }
 
@@ -79,6 +80,69 @@ type domainPolicy struct {
 	addrs []netip.Addr
 	// listeners are the resolver addresses acquired for the container
 	listeners []netip.AddrPort
+	// registered is the policy given to the resolver, nil until then
+	registered *dnsproxy.Policy
+
+	// live tracks the addresses in each set and when they expire, to
+	// keep a container from filling kernel memory with them
+	liveMtx sync.Mutex
+	live    map[*nftables.Set]map[netip.Addr]time.Time
+}
+
+// maxSetAddrs is the number of addresses that can be allowed at the same
+// time by one rule. A wildcard rule lets a container resolve names it
+// controls, each with many addresses, and the kernel keeps every element
+// until its TTL (up to -dns-max-ttl) ends.
+const maxSetAddrs = 4096
+
+var errTooManyAddrs = fmt.Errorf("more than %d addresses allowed by one rule", maxSetAddrs)
+
+// reserve records addrs as allowed in set, or fails without recording
+// anything if that would exceed maxSetAddrs.
+func (p *domainPolicy) reserve(set *nftables.Set, addrs []dnsproxy.Resolved) error {
+	p.liveMtx.Lock()
+	defer p.liveMtx.Unlock()
+
+	if p.live == nil {
+		p.live = make(map[*nftables.Set]map[netip.Addr]time.Time)
+	}
+	m := p.live[set]
+	if m == nil {
+		m = make(map[netip.Addr]time.Time)
+		p.live[set] = m
+	}
+
+	now := time.Now()
+	fresh := 0
+	for _, a := range addrs {
+		if exp, ok := m[a.Addr]; !ok || now.After(exp) {
+			fresh++
+		}
+	}
+	if len(m)+fresh > maxSetAddrs {
+		// forget what has expired and look again
+		for a, exp := range m {
+			if now.After(exp) {
+				delete(m, a)
+			}
+		}
+		fresh = 0
+		for _, a := range addrs {
+			if _, ok := m[a.Addr]; !ok {
+				fresh++
+			}
+		}
+		if len(m)+fresh > maxSetAddrs {
+			return errTooManyAddrs
+		}
+	}
+	for _, a := range addrs {
+		if exp := now.Add(a.TTL); exp.After(m[a.Addr]) {
+			m[a.Addr] = exp
+		}
+	}
+
+	return nil
 }
 
 type domainRule struct {
@@ -400,14 +464,6 @@ func (r *RuleManager) registerDNS(nfc firewallClient, id, name string, cfg confi
 		policy.listeners = append(policy.listeners, listener)
 	}
 
-	r.dnsMtx.Lock()
-	if old, ok := r.dnsPolicies[id]; ok {
-		// rules are being recreated, drop what the previous call acquired
-		r.releaseDNSLocked(old)
-	}
-	r.dnsPolicies[id] = policy
-	r.dnsMtx.Unlock()
-
 	// the host's addresses on the container's networks must never be
 	// reachable through a name, a rebinding attack would make a permitted
 	// name point at services on the host
@@ -416,7 +472,7 @@ func (r *RuleManager) registerDNS(nfc firewallClient, id, name string, cfg confi
 		gateways[ep.gateway] = true
 	}
 
-	r.dns.Register(policy.addrs, &dnsproxy.Policy{
+	registered := &dnsproxy.Policy{
 		Name:    name,
 		Match:   policy.matches,
 		HasIPv6: hasFamily(states, family6),
@@ -426,7 +482,20 @@ func (r *RuleManager) registerDNS(nfc firewallClient, id, name string, cfg confi
 		Allow: func(ctx context.Context, qname string, addrs []dnsproxy.Resolved) error {
 			return r.allowAddrs(policy, qname, addrs)
 		},
-	})
+	}
+
+	policy.registered = registered
+
+	r.dnsMtx.Lock()
+	if old, ok := r.dnsPolicies[id]; ok {
+		// rules are being recreated, drop what the previous call acquired
+		r.releaseDNSLocked(old)
+	}
+	r.dnsPolicies[id] = policy
+	// registering under the lock keeps a concurrent removal of the
+	// container from running between the two
+	r.dns.Register(policy.addrs, registered)
+	r.dnsMtx.Unlock()
 
 	return nil
 }
@@ -461,6 +530,19 @@ func (r *RuleManager) allowAddrs(p *domainPolicy, qname string, addrs []dnsproxy
 	for _, rule := range p.rules {
 		if !rule.domains.matches(qname) {
 			continue
+		}
+		for _, fam := range families {
+			var famAddrs []dnsproxy.Resolved
+			for _, a := range addrs {
+				if familyOfAddr(a.Addr) == fam {
+					famAddrs = append(famAddrs, a)
+				}
+			}
+			if set, ok := rule.sets[fam]; ok && len(famAddrs) != 0 {
+				if err := p.reserve(set, famAddrs); err != nil {
+					return err
+				}
+			}
 		}
 		for _, a := range addrs {
 			set, ok := rule.sets[familyOfAddr(a.Addr)]
@@ -500,7 +582,7 @@ func (r *RuleManager) unregisterDNS(id string) {
 }
 
 func (r *RuleManager) releaseDNSLocked(p *domainPolicy) {
-	r.dns.Unregister(p.addrs)
+	r.dns.Unregister(p.addrs, p.registered)
 	for _, l := range p.listeners {
 		r.dns.Release(l)
 	}

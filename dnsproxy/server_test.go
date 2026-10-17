@@ -287,9 +287,8 @@ func TestUnknownSourceRefused(t *testing.T) {
 	s, addr := newServer(t, up, time.Second)
 
 	rec := &recorder{}
-	s.Register([]netip.Addr{netip.MustParseAddr("127.0.0.2")}, &Policy{
-		Name: clientName, Match: matchSuffix("corp.test"), Allow: rec.allow,
-	})
+	pol := &Policy{Name: clientName, Match: matchSuffix("corp.test"), Allow: rec.allow}
+	s.Register([]netip.Addr{netip.MustParseAddr("127.0.0.2")}, pol)
 
 	resp := query(t, "udp", addr, "127.0.0.1", "a.corp.test", dns.TypeA)
 	is.Equal(resp.Rcode, dns.RcodeRefused)
@@ -299,7 +298,7 @@ func TestUnknownSourceRefused(t *testing.T) {
 	is.Equal(resp.Rcode, dns.RcodeSuccess)
 
 	// after unregistering the source is refused again
-	s.Unregister([]netip.Addr{netip.MustParseAddr("127.0.0.2")})
+	s.Unregister([]netip.Addr{netip.MustParseAddr("127.0.0.2")}, pol)
 	resp = query(t, "udp", addr, "127.0.0.2", "a.corp.test", dns.TypeA)
 	is.Equal(resp.Rcode, dns.RcodeRefused)
 }
