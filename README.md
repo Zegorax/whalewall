@@ -328,8 +328,9 @@ Requirements and behavior to be aware of:
 - **The container must set the `dns` option** (to any address, for example `192.0.2.53`). Docker's
 embedded resolver (`127.0.0.11`) forwards queries from the host's network namespace unless the
 container has custom DNS servers, and queries from the host can't be attributed to a container.
-If a container has domain rules but no `dns` option, whalewall logs an error and drops all of the
-container's traffic. The same happens if the rules are invalid, or if `-dns` is not set.
+If a container has domain rules but no `dns` option, whalewall logs an error and, with `-isolate-invalid`,
+drops all of the container's traffic; without it the container gets no rules and is not restricted. The same
+applies if the rules are invalid, or if `-dns` is not set. Use `-isolate-invalid` together with domain rules.
 - Other DNS transports are covered by the default drop: DNS over TLS (port 853) and DNS over HTTPS
 only work to addresses that were allowed.
 - An allowed address is open to every name that lives behind it. If an allowed domain shares an IP
@@ -356,11 +357,14 @@ characters are refused. Look-alike names (other-case Unicode, trailing dots, emb
 Resource limits keep one container from exhausting the resolver or whalewall: at most 100 queries per
 second (bursts of 200), 32 queries waiting for the upstream and 16 open TCP connections per container.
 One rule can allow at most 4096 addresses at a time; a query that would exceed that fails. Queries over the limit are dropped, connections from addresses that aren't managed containers are closed
-at once, and log lines caused by a single container are sampled. A rules label larger than 64 KiB, with
-more than 256 rules or 4096 addresses, domains and ports, or with more than one YAML document is invalid.
+at once, and log lines caused by a single container are sampled. A rules label larger than 1 MiB, with
+more than 1000 rules or 20000 addresses, domains and ports is invalid. Only the first YAML document of a
+label is used, whalewall logs a warning if there is another one.
 
-Invalid rules, for any reason, isolate the container completely instead of leaving it unmanaged. This
-includes a `container` rule that names a container which does not have `whalewall.enabled` set.
+Invalid rules: by default a container with invalid rules gets no rules and is not restricted, and
+whalewall logs an error, as it always did. With `-isolate-invalid` all traffic of the container is dropped
+instead; this is recommended, since a typo in a label otherwise leaves the container open. A `container`
+rule that names a container which does not have `whalewall.enabled` set always isolates the container.
 
 Known limitations: another container on the same bridge can be reached if an allowed name resolves to
 its address; networks connected to a container after it started are not managed; a container that uses
@@ -377,7 +381,9 @@ container that keeps one of these capabilities.
 
 ### IPv6
 
-Whalewall manages IPv6 traffic of containers that have an IPv6 address, in addition to IPv4. This needs
+With the `-ipv6` flag whalewall manages IPv6 traffic of containers that have an IPv6 address, in addition
+to IPv4. Without it IPv6 traffic is not touched, as before (a warning is logged for containers that
+have an IPv6 address). This needs
 Docker's IPv6 firewalling to be enabled (`"ipv6": true` and `"ip6tables": true` in `daemon.json`,
 Docker 28 or newer) so that Docker creates the `DOCKER-USER` chain for IPv6. If a managed container
 has an IPv6 address and whalewall can't manage IPv6, whalewall logs an error and creates no rules
@@ -387,6 +393,24 @@ solicitation, neighbor solicitation and advertisement) and packet too big messag
 managed containers since IPv6 can't work without them. Router advertisements and redirects are not: a
 container could use them to take over the IPv6 routes of the other containers on its network.
 `mapped_ports` rules are only supported for IPv4.
+
+### Compatibility
+
+Everything new is off unless it is asked for, so updating whalewall does not change what it does for an
+existing setup. The rules created for containers without the new features are the same as the ones older
+versions created, whalewall takes over rules created by an older version when it starts, and the state
+database is unchanged.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `-dns` | off | Enables `domains` in rules and the DNS resolver (see "Domain rules"). |
+| `-ipv6` | off | Manages the IPv6 traffic of containers with an IPv6 address. |
+| `-isolate-invalid` | off | Drops all traffic of a container whose rules are invalid, instead of leaving it without rules. |
+
+Always on, and only informational: warnings about missing `br_netfilter`, enabled connection tracking
+helpers, and about containers that keep `NET_RAW`, `NET_ADMIN` or `SYS_ADMIN`, or are privileged. A
+container that uses the network of another container is no longer silently skipped, an error is logged.
+Rules labels larger than 1 MiB, with more than 1000 rules or 20000 addresses, domains and ports are invalid.
 
 ### Docker environmental variables
 

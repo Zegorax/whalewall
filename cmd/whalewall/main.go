@@ -41,6 +41,8 @@ func mainRetCode() int {
 	dnsMinTTL := flag.Duration("dns-min-ttl", 30*time.Second, "minimum time an address resolved from an allowed domain stays allowed")
 	dnsMaxTTL := flag.Duration("dns-max-ttl", time.Hour, "maximum time an address resolved from an allowed domain stays allowed, whatever the TTL of the record is")
 	dnsGrace := flag.Duration("dns-grace", 5*time.Second, "time added to the TTL of every resolved address")
+	ipv6 := flag.Bool("ipv6", false, "manage the IPv6 traffic of containers that have an IPv6 address; needs Docker's ip6tables support")
+	isolateInvalid := flag.Bool("isolate-invalid", false, "drop all traffic of a container whose rules are invalid; by default a container with invalid rules gets no rules and is not restricted")
 	displayVersion := flag.Bool("version", false, "print version and build information and exit")
 	flag.Parse()
 
@@ -101,6 +103,12 @@ func mainRetCode() int {
 	defer cancel()
 
 	var opts []whalewall.Option
+	if *ipv6 {
+		opts = append(opts, whalewall.WithIPv6())
+	}
+	if *isolateInvalid {
+		opts = append(opts, whalewall.WithIsolateInvalidRules())
+	}
 	if *dnsEnabled {
 		if *dnsPort == 0 || *dnsPort > 65535 {
 			logger.Error("invalid DNS port", zap.Uint("dns.port", *dnsPort))

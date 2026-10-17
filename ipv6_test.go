@@ -112,10 +112,23 @@ type ipv6TestEnv struct {
 func newIPv6TestEnv(t *testing.T, v6, dnsEnabled bool) *ipv6TestEnv {
 	t.Helper()
 
+	// IPv6 is opt-in; most tests also check that invalid rules isolate
+	// a container
+	opts := []Option{WithIsolateInvalidRules()}
+	if v6 {
+		opts = append(opts, WithIPv6())
+	}
+
+	return newTestEnv(t, v6, dnsEnabled, opts...)
+}
+
+// newTestEnv is like newIPv6TestEnv with the options given.
+func newTestEnv(t *testing.T, v6, dnsEnabled bool, opts ...Option) *ipv6TestEnv {
+	t.Helper()
+
 	is := is.New(t)
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.DebugLevel))
 
-	var opts []Option
 	if dnsEnabled {
 		opts = append(opts, WithDNS(DNSOptions{Port: 5353}))
 	}
@@ -146,7 +159,8 @@ func newIPv6TestEnv(t *testing.T, v6, dnsEnabled bool) *ipv6TestEnv {
 
 	is.NoErr(r.init(context.Background()))
 	is.NoErr(r.createBaseRules())
-	if v6 {
+	if v6 && r.ipv6Enabled {
+		// like Start does
 		is.NoErr(r.ensureIPv6BaseRules())
 	}
 
@@ -410,8 +424,8 @@ func TestIPv6OnlyContainer(t *testing.T) {
 func TestIPv6NotManaged(t *testing.T) {
 	t.Parallel()
 
-	// Docker's IPv6 chains don't exist
-	env := newIPv6TestEnv(t, false, false)
+	// Docker's IPv6 chains don't exist, but -ipv6 was given
+	env := newTestEnv(t, false, false, WithIPv6(), WithIsolateInvalidRules())
 	is := env.is
 
 	is.True(env.r.ensureIPv6BaseRules() != nil)

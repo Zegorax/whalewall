@@ -554,12 +554,12 @@ func TestListenerRefcount(t *testing.T) {
 	up := newFakeUpstream(t, zoneHandler(t, nil))
 	s, err := New(zaptest.NewLogger(t), Config{Upstreams: []string{up.addr}})
 	is.NoErr(err)
-	addr := freeAddr(t, "127.0.0.1")
 
 	// connections of sources without a policy are closed
 	registerLoopback(s, &Policy{Name: clientName, Match: matchSuffix(policyZone), Allow: (&recorder{}).allow})
 
-	is.NoErr(s.Acquire(addr))
+	// another test can take the port between finding it and listening
+	addr := acquireFree(t, s)
 	is.NoErr(s.Acquire(addr))
 	s.Release(addr)
 

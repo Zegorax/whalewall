@@ -324,9 +324,9 @@ const (
 	// maxRulesLabelSize, maxRules and maxEntries keep a container's
 	// rules from using unreasonable amounts of memory and CPU in
 	// whalewall and the kernel; real configs are far below them.
-	maxRulesLabelSize = 64 << 10
-	maxRules          = 256
-	maxEntries        = 4096
+	maxRulesLabelSize = 1 << 20
+	maxRules          = 1000
+	maxEntries        = 20000
 )
 
 func validateConfig(c config) error {

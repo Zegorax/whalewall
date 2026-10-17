@@ -8,7 +8,6 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
-	"io"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -91,11 +90,15 @@ type famState struct {
 
 // containerAddrs returns the IPv4 and IPv6 addresses of a container by
 // network name.
-func containerAddrs(networks map[string]*network.EndpointSettings, contName string) (map[string][]byte, map[string][]byte, error) {
+func containerAddrs(networks map[string]*network.EndpointSettings, contName string, ipv6 bool) (map[string][]byte, map[string][]byte, error) {
 	addrs4 := make(map[string][]byte, len(networks))
 	addrs6 := make(map[string][]byte)
 	for netName, netSettings := range networks {
-		if netSettings.IPAddress == "" && netSettings.GlobalIPv6Address == "" {
+		globalIPv6 := netSettings.GlobalIPv6Address
+		if !ipv6 {
+			globalIPv6 = ""
+		}
+		if netSettings.IPAddress == "" && globalIPv6 == "" {
 			// produces the same error as before IPv6 was supported
 			_, err := netip.ParseAddr(netSettings.IPAddress)
 			return nil, nil, fmt.Errorf("error parsing IP of container: %q: %w", contName, err)
@@ -107,8 +110,8 @@ func containerAddrs(networks map[string]*network.EndpointSettings, contName stri
 			}
 			addrs4[netName] = addrBytes(addr)
 		}
-		if netSettings.GlobalIPv6Address != "" {
-			addr, err := netip.ParseAddr(netSettings.GlobalIPv6Address)
+		if globalIPv6 != "" {
+			addr, err := netip.ParseAddr(globalIPv6)
 			if err != nil {
 				return nil, nil, fmt.Errorf("error parsing IPv6 address of container: %q: %w", contName, err)
 			}
@@ -129,11 +132,10 @@ func (r *RuleManager) parseRules(cfg string, container types.ContainerJSON, rule
 	if err := dec.Decode(rulesCfg); err != nil {
 		return fmt.Errorf("error parsing rules: %w", err)
 	}
-	// a second document would be ignored, which is surprising enough to
-	// refuse
+	// only the first document is used; say so if there is another one
 	var extra yaml.Node
-	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		return errors.New("rules must be a single YAML document")
+	if err := dec.Decode(&extra); err == nil && len(extra.Content) != 0 && extra.Content[0].Kind != 0 {
+		r.logger.Warn("the rules contain more than one YAML document, only the first is used", zap.String("container.name", stripName(container.Name)))
 	}
 	if err := validateConfig(*rulesCfg); err != nil {
 		return fmt.Errorf("error validating rules: %w", err)
@@ -174,7 +176,7 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 		if container.HostConfig != nil {
 			mode = string(container.HostConfig.NetworkMode)
 		}
-		return fmt.Errorf("container %q has no network of its own (network mode %q); a container that uses another container's network is filtered by the rules of that container, if it has any, and its own rules cannot be applied", contName, mode)
+		logger.Error("the container has no network of its own (network mode " + strconv.Quote(mode) + "); a container that uses another container's network is filtered by the rules of that container, if it has any, and its own rules cannot be applied")
 	}
 	if len(container.NetworkSettings.Networks) == 1 {
 		if _, ok := container.NetworkSettings.Networks[hostNetworkName]; ok {
@@ -196,16 +198,29 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 	var rulesCfg config
 	cfg, configExists := container.Config.Labels[rulesLabel]
 	if configExists {
-		// If the rules are invalid the container is isolated completely
-		// instead of being left unmanaged.
+		// If the rules are invalid the container is left unmanaged, or
+		// isolated completely if whalewall was asked to.
 		if err := r.parseRules(cfg, container, &rulesCfg); err != nil {
+			if !r.isolateInvalid {
+				// the container is left without rules
+				return err
+			}
 			logger.Error("invalid rules, all traffic of the container is dropped", zap.Error(err))
 			rulesCfg = config{}
 		}
 	}
 
+	if !r.ipv6Enabled {
+		for _, netSettings := range container.NetworkSettings.Networks {
+			if netSettings.GlobalIPv6Address != "" {
+				logger.Warn("the container has an IPv6 address, its IPv6 traffic is not managed; start whalewall with -ipv6 to manage it")
+				break
+			}
+		}
+	}
+
 	// ensure specified networks and containers in rules are valid
-	addrs4, addrs6, err := containerAddrs(container.NetworkSettings.Networks, contName)
+	addrs4, addrs6, err := containerAddrs(container.NetworkSettings.Networks, contName, r.ipv6Enabled)
 	if err != nil {
 		return err
 	}

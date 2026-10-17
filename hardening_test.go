@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/network"
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
 	"github.com/matryer/is"
@@ -166,22 +168,21 @@ func TestHostileRulesAreContained(t *testing.T) {
 	}
 	aliases.WriteString("output:\n  - ips: *k\n    proto: tcp\n    dst_ports: [80]\n")
 
-	manyDomains := make([]string, 5000)
+	manyDomains := make([]string, maxEntries+1)
 	for i := range manyDomains {
 		manyDomains[i] = fmt.Sprintf("h%d.example.com", i)
 	}
-	manyRules := strings.Repeat("  - proto: tcp\n    dst_ports: [80]\n", 1000)
+	manyRules := strings.Repeat("  - proto: tcp\n    dst_ports: [80]\n", maxRules+1)
 
 	tests := map[string]string{
 		"alias bomb":    aliases.String(),
-		"huge label":    "output:\n  - proto: tcp\n    dst_ports: [80]\n# " + strings.Repeat("x", 1<<20),
+		"huge label":    "output:\n  - proto: tcp\n    dst_ports: [80]\n# " + strings.Repeat("x", maxRulesLabelSize),
 		"many domains":  "output:\n  - domains: [" + strings.Join(manyDomains, ",") + "]\n    proto: tcp\n    dst_ports: [443]\n",
 		"many rules":    "output:\n" + manyRules,
 		"deep nesting":  "output:\n  - ips: " + strings.Repeat("[", 5000) + strings.Repeat("]", 5000) + "\n    proto: tcp\n    dst_ports: [80]\n",
 		"long scalar":   "output:\n  - proto: tcp\n    dst_ports: [" + strings.Repeat("1", 1<<16) + "]\n",
-		"many ports":    "output:\n  - proto: tcp\n    dst_ports: [" + strings.TrimSuffix(strings.Repeat("80,", 5000), ",") + "]\n",
+		"many ports":    "output:\n  - proto: tcp\n    dst_ports: [" + strings.TrimSuffix(strings.Repeat("80,", maxEntries+1), ",") + "]\n",
 		"binary":        "output:\n  - proto: tcp\x00\n",
-		"multi doc":     "output:\n  - proto: tcp\n    dst_ports: [80]\n---\noutput:\n  - ips: [0.0.0.0/0]\n    proto: tcp\n    dst_ports: [1-65535]\n",
 		"unknown field": "output:\n  - proto: tcp\n    dst_ports: [80]\n    allow_all: true\n",
 		"tag tricks":    "output:\n  - !!binary proto: tcp\n",
 	}
@@ -356,4 +357,105 @@ output:
 	env.refresh()
 	exact := env.mfc.tables[filterTableName].Sets[domainSetName(cont1ID, 1, family4)]
 	is.Equal(len(exact), 64)
+}
+
+// TestOnlyTheFirstYAMLDocumentIsUsed: as before, a second document in the
+// label is ignored; it must not be able to widen the rules.
+func TestOnlyTheFirstYAMLDocumentIsUsed(t *testing.T) {
+	t.Parallel()
+	is := is.New(t)
+
+	env := newIPv6TestEnv(t, true, false)
+	rules := "output:\n  - proto: tcp\n    dst_ports: [80]\n---\noutput:\n  - ips: [0.0.0.0/0]\n    proto: tcp\n    dst_ports: [1-65535]\n"
+	c := dualStackContainer(cont1ID, cont1Name, map[string]string{rulesLabel: rules}, nil)
+	is.NoErr(env.r.createContainerRules(context.Background(), c, true))
+
+	got, err := env.mfc.GetRules(family4.table, chainOf(family4, cont1Name, cont1ID))
+	is.NoErr(err)
+	var accepting int
+	for _, rule := range got {
+		if !hasAcceptOrQueueVerdict(rule) {
+			continue
+		}
+		accepting++
+		for _, e := range rule.Exprs {
+			if c, ok := e.(*expr.Cmp); ok && bytes.Equal(c.Data, []byte{0xff, 0xff}) {
+				t.Error("a rule of the second document was applied")
+			}
+		}
+	}
+	is.True(accepting > 0) // the first document applies
+}
+
+// The tests below check that without any of the new options whalewall
+// behaves as it did before they existed.
+
+func TestDefaultsKeepInvalidRulesUnmanaged(t *testing.T) {
+	t.Parallel()
+	is := is.New(t)
+
+	env := newTestEnv(t, true, false) // no options
+	c := dualStackContainer(cont1ID, cont1Name, map[string]string{rulesLabel: "output:\n  - bogus: true\n"}, nil)
+
+	err := env.r.createContainerRules(context.Background(), c, true)
+	is.True(err != nil) // reported
+	// and no rules were created, like before
+	_, err = env.mfc.GetRules(family4.table, chainOf(family4, cont1Name, cont1ID))
+	is.True(errors.Is(err, syscall.ENOENT))
+
+	// the same rules isolate the container if asked to
+	env = newTestEnv(t, true, false, WithIsolateInvalidRules())
+	is.NoErr(env.r.createContainerRules(context.Background(), c, true))
+	got, err := env.mfc.GetRules(family4.table, chainOf(family4, cont1Name, cont1ID))
+	is.NoErr(err)
+	is.True(len(got) > 0)
+}
+
+func TestDefaultsDoNotTouchIPv6(t *testing.T) {
+	t.Parallel()
+	is := is.New(t)
+
+	// Docker has IPv6 chains, the container has an IPv6 address
+	env := newTestEnv(t, true, false) // no options
+	rules := "output:\n  - proto: tcp\n    dst_ports: [443]\n"
+	c := dualStackContainer(cont1ID, cont1Name, map[string]string{rulesLabel: rules}, nil)
+	is.NoErr(env.r.createContainerRules(context.Background(), c, true))
+
+	_, err := env.mfc.GetRules(family4.table, chainOf(family4, cont1Name, cont1ID))
+	is.NoErr(err) // IPv4 is managed
+	_, err = env.mfc.GetRules(family6.table, chainOf(family6, cont1Name, cont1ID))
+	is.True(err != nil) // IPv6 is not
+	is.True(!env.r.ipv6Ready)
+
+	// with -ipv6 it is
+	env = newTestEnv(t, true, false, WithIPv6())
+	is.NoErr(env.r.createContainerRules(context.Background(), c, true))
+	_, err = env.mfc.GetRules(family6.table, chainOf(family6, cont1Name, cont1ID))
+	is.NoErr(err)
+}
+
+func TestDefaultsDoNotCreateIPv6BaseRulesAtStart(t *testing.T) {
+	t.Parallel()
+	is := is.New(t)
+
+	env := newTestEnv(t, true, false) // no options
+	chains, err := env.mfc.ListChainsOfTableFamily(nftables.TableFamilyIPv6)
+	is.NoErr(err)
+	for _, ch := range chains {
+		if ch.Name == whalewallChainName {
+			t.Error("the whalewall chain exists in the IPv6 table")
+		}
+	}
+}
+
+func TestContainerWithoutNetworkDoesNotFail(t *testing.T) {
+	t.Parallel()
+	is := is.New(t)
+
+	env := newTestEnv(t, false, false)
+	c := dualStackContainer(cont1ID, cont1Name, map[string]string{}, nil)
+	c.NetworkSettings.Networks = map[string]*network.EndpointSettings{}
+	// like before, this is not an error (the container uses another
+	// container's network); an error is logged
+	is.NoErr(env.r.createContainerRules(context.Background(), c, true))
 }

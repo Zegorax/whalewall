@@ -144,6 +144,12 @@ ww_start() {
 	if [ "${#flags[@]}" = 0 ]; then
 		flags=(-dns -dns-upstream 127.0.0.1:5300 -dns-min-ttl 1s -dns-max-ttl 20s -dns-grace 1s)
 	fi
+	# the scenarios expect invalid rules to isolate a container and IPv6
+	# to be managed; WW_LEGACY=1 starts whalewall with the flags given only
+	if [ "${WW_LEGACY:-0}" != 1 ]; then
+		flags+=(-isolate-invalid)
+		[ "$E2E_IPV6" = 1 ] && flags+=(-ipv6)
+	fi
 	local started
 	started=$(start_count)
 	"$WW" "${flags[@]}" -debug -d "$OUT/data" -l "$OUT/whalewall.log" >>"$OUT/whalewall.stdout" 2>&1 &

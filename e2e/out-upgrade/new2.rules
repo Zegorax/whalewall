@@ -1,0 +1,70 @@
+
+
+
+
+
+
+
+
+
+
+
+
+		counter jump DOCKER-BRIDGE
+		counter jump DOCKER-CT
+		counter jump DOCKER-FORWARD
+		counter jump DOCKER-INTERNAL
+		counter jump DOCKER-USER
+		counter jump whalewall
+		counter jump whalewall
+		counter jump whalewall
+		counter log prefix "whalewall-upg-cli-7401e35f8b6a drop: " level info drop
+		counter log prefix "whalewall-upg-srv-d375f8f3347a drop: " level info drop
+		elements = { 10.97.0.10 : jump whalewall-upg-srv-d375f8f3347a, 10.97.0.11 : jump whalewall-upg-cli-7401e35f8b6a }
+		iifname != "br-82a88e2ce866" oifname "br-82a88e2ce866" counter drop
+		iifname != "docker0" oifname "docker0" counter drop
+		iifname "br-82a88e2ce866" counter accept
+		iifname "docker0" counter accept
+		ip daddr 10.97.0.11 udp sport 53 ct state established,related counter accept
+		ip daddr vmap @whalewall-container-addrs
+		ip saddr 10.97.0.10 ip daddr 10.97.0.11 tcp sport 8080 ct state established,related counter accept
+		ip saddr 10.97.0.11 ip daddr 10.97.0.10 tcp dport 8080 ct state established,related,new counter accept
+		ip saddr 10.97.0.11 udp dport 53 ct state established,related counter accept
+		ip saddr 10.97.0.11 udp dport 53 ct state new counter log prefix "whalewall-upg-cli-7401e35f8b6a dns: " level info accept
+		ip saddr vmap @whalewall-container-addrs
+		oifname "br-82a88e2ce866" counter jump DOCKER
+		oifname "br-82a88e2ce866" ct state related,established counter accept
+		oifname "docker0" counter jump DOCKER
+		oifname "docker0" ct state related,established counter accept
+		type filter hook forward priority filter; policy drop;
+		type filter hook input priority filter; policy accept;
+		type filter hook output priority filter; policy accept;
+		type ipv4_addr : verdict
+	chain DOCKER {
+	chain DOCKER-BRIDGE {
+	chain DOCKER-CT {
+	chain DOCKER-FORWARD {
+	chain DOCKER-INTERNAL {
+	chain DOCKER-USER {
+	chain FORWARD {
+	chain INPUT {
+	chain OUTPUT {
+	chain whalewall {
+	chain whalewall-upg-cli-7401e35f8b6a {
+	chain whalewall-upg-srv-d375f8f3347a {
+	map whalewall-container-addrs {
+	}
+	}
+	}
+	}
+	}
+	}
+	}
+	}
+	}
+	}
+	}
+	}
+	}
+table ip filter {
+}

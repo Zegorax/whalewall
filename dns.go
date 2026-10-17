@@ -51,6 +51,23 @@ type DNSOptions struct {
 // Option configures a [RuleManager].
 type Option func(*RuleManager)
 
+// WithIPv6 makes whalewall manage the IPv6 traffic of containers that have
+// an IPv6 address. Without it IPv6 traffic is not touched.
+func WithIPv6() Option {
+	return func(r *RuleManager) {
+		r.ipv6Enabled = true
+	}
+}
+
+// WithIsolateInvalidRules isolates a container completely if its rules
+// are invalid. Without it a container with invalid rules gets no rules at
+// all and so is not restricted, an error is logged.
+func WithIsolateInvalidRules() Option {
+	return func(r *RuleManager) {
+		r.isolateInvalid = true
+	}
+}
+
 // WithDNS enables rules that allow traffic by domain name.
 func WithDNS(opts DNSOptions) Option {
 	return func(r *RuleManager) {

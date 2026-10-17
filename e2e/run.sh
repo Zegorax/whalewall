@@ -1042,9 +1042,23 @@ output:
 	curl_in hb1 "$WEBA"
 	assert_fail "the container is isolated"
 
-	big=$(head -c 70000 /dev/zero | tr '\0' x)
-	start_client hb2 10.99.0.191 "# $big
-$(rules '["a.corp.test"]')" --dns "$DUMMY_DNS"
+	# too large for the docker command line (and its --label-file), so the
+	# container is created through the API
+	docker rm -f hb2 >/dev/null 2>&1
+	python3 - "$OUT/big.json" "$IMG" "$NET" <<'PYEOF2'
+import json, sys
+out, img, net = sys.argv[1:4]
+labels = {"whalewall.enabled": "true", "whalewall.rules": "# " + "x" * 1100000}
+body = {
+    "Image": img, "Entrypoint": ["sleep"], "Cmd": ["infinity"], "Labels": labels,
+    "HostConfig": {"NetworkMode": net, "Dns": ["192.0.2.53"]},
+    "NetworkingConfig": {"EndpointsConfig": {net: {"IPAMConfig": {"IPv4Address": "10.99.0.191"}}}},
+}
+json.dump(body, open(out, "w"))
+PYEOF2
+	curl -sS --unix-socket /var/run/docker.sock -X POST -H 'Content-Type: application/json' --data @"$OUT/big.json" "http://localhost/containers/create?name=hb2" >/dev/null
+	docker start hb2 >/dev/null
+	wait_rules hb2
 	ww_log_excerpt 'invalid rules.*hb2' 1
 	assert_contains "larger than" "an oversized label is rejected"
 	curl_in hb2 "$WEBA"
@@ -1056,10 +1070,12 @@ output:
   - ips: [0.0.0.0/0]
     proto: tcp
     dst_ports: [1-65535]" --dns "$DUMMY_DNS"
-	ww_log_excerpt 'invalid rules.*hb3' 1
-	assert_contains "single YAML document" "a second YAML document is rejected"
+	ww_log_excerpt 'more than one YAML document.*hb3' 1
+	assert_contains "only the first is used" "a second YAML document is reported and ignored"
+	curl_in hb3 "http://a.corp.test:8080/"
+	assert_contains "hello from web-a" "the first document applies"
 	curl_in hb3 "$WEBB"
-	assert_fail "the container is isolated"
+	assert_fail "the second document did not widen the rules"
 
 	say "whalewall still manages new containers right away"
 	start_client hb4 10.99.0.193 "$(rules '["a.corp.test"]')" --dns "$DUMMY_DNS"
@@ -1112,6 +1128,50 @@ s38() {
 	sc_end
 }
 
+s39() {
+	sc_begin 39 legacy-defaults "Without the new flags whalewall behaves as before"
+	say "whalewall is restarted with no flags at all"
+	ww_stop
+	WW_LEGACY=1 ww_start -t 10s
+
+	say "invalid rules: the container gets no rules and is not restricted, an error is logged"
+	start_client lg1 10.99.0.210 'output:
+  - bogus: true' || true
+	ww_log_excerpt 'lg1' 3
+	assert_contains "error" "an error is logged"
+	curl_in lg1 "$WEBB"
+	assert_contains "hello from web-b" "the container is not restricted (as before)"
+	hostsh "nft list ruleset 2>/dev/null | grep -c whalewall-lg1 || true"
+	assert_eq "$LAST_OUT" 0 "no chain was created for it"
+
+	say "valid rules work as before"
+	start_client lg2 10.99.0.211 'output:
+  - ips: ["10.99.0.10"]
+    proto: tcp
+    dst_ports: [8080]'
+	curl_in lg2 "$WEBA"
+	assert_contains "hello from web-a" "the allowed address is reachable"
+	curl_in lg2 "$WEBB"
+	assert_fail "everything else is dropped"
+
+	say "domain rules need -dns, as the label is only understood with it"
+	start_client lg3 10.99.0.212 "$(rules '["a.corp.test"]')" --dns "$DUMMY_DNS" || true
+	curl_in lg3 "$WEBB"
+	assert_contains "hello from web-b" "without -dns the rules are rejected and the container is left alone, like any invalid rules"
+
+	if has_v6; then
+		say "IPv6 is left alone without -ipv6"
+		hostsh "nft list table ip6 filter 2>/dev/null | grep -c 'whalewall-lg2' || true"
+		assert_eq "$LAST_OUT" 0 "no IPv6 chain exists for a container with an IPv6 address"
+		ww_log_excerpt 'IPv6 traffic is not managed' 1
+		assert_contains "-ipv6" "whalewall says how to manage IPv6"
+	fi
+	rm_containers lg1 lg2 lg3
+	ww_stop
+	ww_start
+	sc_end
+}
+
 s23() {
 	sc_begin 23 clear "whalewall -clear removes everything it created"
 	rm_containers $(docker ps -aq --filter label=whalewall.enabled=true) 2>/dev/null
@@ -1134,7 +1194,7 @@ s23() {
 # ----------------------------------------------------------------- main
 
 setup
-for n in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 23; do
+for n in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 23; do
 	want "$n" && "s$n"
 done
 

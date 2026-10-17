@@ -58,6 +58,11 @@ type RuleManager struct {
 	createCh chan containerDetails
 	deleteCh chan string
 
+	// ipv6Enabled is set by WithIPv6, isolateInvalid by
+	// WithIsolateInvalidRules
+	ipv6Enabled    bool
+	isolateInvalid bool
+
 	// ipv6Ready is true when the base rules for IPv6 exist
 	ipv6Mtx   sync.Mutex
 	ipv6Ready bool
@@ -130,8 +135,10 @@ func (r *RuleManager) Start(ctx context.Context) error {
 	if err := r.createFamilyBaseRules(family4); err != nil {
 		return fmt.Errorf("error creating base rules: %w", err)
 	}
-	if err := r.ensureIPv6BaseRules(); err != nil {
-		r.logger.Info("not managing IPv6 traffic", zap.Error(err))
+	if r.ipv6Enabled {
+		if err := r.ensureIPv6BaseRules(); err != nil {
+			r.logger.Info("not managing IPv6 traffic", zap.Error(err))
+		}
 	}
 
 	if err := r.cleanupRules(ctx); err != nil {
