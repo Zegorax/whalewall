@@ -89,7 +89,7 @@ func spoof(args []string) {
 	binary.BigEndian.PutUint16(udp[4:], uint16(len(udp)))
 	copy(udp[8:], payload)
 
-	ip := make([]byte, 20)
+	ip := make([]byte, 20, 20+len(udp))
 	ip[0] = 0x45
 	binary.BigEndian.PutUint16(ip[2:], uint16(20+len(udp)))
 	ip[8] = 64

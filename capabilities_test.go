@@ -17,14 +17,14 @@ func TestCapabilityWarnings(t *testing.T) {
 		want string // substring of the only warning, empty for none
 	}{
 		{name: "nil", hc: nil},
-		{name: "default capabilities", hc: &container.HostConfig{}, want: "NET_RAW"},
-		{name: "NET_RAW dropped", hc: &container.HostConfig{CapDrop: []string{"NET_RAW"}}},
+		{name: "default capabilities", hc: &container.HostConfig{}, want: capNetRaw},
+		{name: "NET_RAW dropped", hc: &container.HostConfig{CapDrop: []string{capNetRaw}}},
 		{name: "prefixed and lower case", hc: &container.HostConfig{CapDrop: []string{"cap_net_raw"}}},
-		{name: "everything dropped", hc: &container.HostConfig{CapDrop: []string{"ALL"}}},
-		{name: "everything dropped, NET_RAW added back", hc: &container.HostConfig{CapDrop: []string{"ALL"}, CapAdd: []string{"NET_RAW"}}, want: "NET_RAW"},
-		{name: "NET_ADMIN", hc: &container.HostConfig{CapDrop: []string{"NET_RAW"}, CapAdd: []string{"NET_ADMIN"}}, want: "NET_ADMIN"},
-		{name: "SYS_ADMIN", hc: &container.HostConfig{CapDrop: []string{"NET_RAW"}, CapAdd: []string{"SYS_ADMIN"}}, want: "SYS_ADMIN"},
-		{name: "privileged", hc: &container.HostConfig{Privileged: true, CapDrop: []string{"ALL"}}, want: "privileged"},
+		{name: "everything dropped", hc: &container.HostConfig{CapDrop: []string{capAll}}},
+		{name: "everything dropped, NET_RAW added back", hc: &container.HostConfig{CapDrop: []string{capAll}, CapAdd: []string{capNetRaw}}, want: capNetRaw},
+		{name: capNetAdmin, hc: &container.HostConfig{CapDrop: []string{capNetRaw}, CapAdd: []string{capNetAdmin}}, want: capNetAdmin},
+		{name: capSysAdmin, hc: &container.HostConfig{CapDrop: []string{capNetRaw}, CapAdd: []string{capSysAdmin}}, want: capSysAdmin},
+		{name: "privileged", hc: &container.HostConfig{Privileged: true, CapDrop: []string{capAll}}, want: "privileged"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -38,7 +38,7 @@ func TestCapabilityWarnings(t *testing.T) {
 			}
 			is.Equal(len(got), 1)
 			is.True(strings.Contains(got[0].msg, tt.want))
-			is.Equal(got[0].severe, tt.want != "NET_RAW")
+			is.Equal(got[0].severe, tt.want != capNetRaw)
 		})
 	}
 }

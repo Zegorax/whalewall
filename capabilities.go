@@ -6,12 +6,19 @@ import (
 	"github.com/docker/docker/api/types/container"
 )
 
+const (
+	capNetRaw   = "NET_RAW"
+	capNetAdmin = "NET_ADMIN"
+	capSysAdmin = "SYS_ADMIN"
+	capAll      = "ALL"
+)
+
 // capHas reports whether a list of capabilities names capability, with or
 // without the CAP_ prefix, or ALL.
 func capHas(caps []string, name string) bool {
 	for _, c := range caps {
 		c = strings.TrimPrefix(strings.ToUpper(c), "CAP_")
-		if c == name || c == "ALL" {
+		if c == name || c == capAll {
 			return true
 		}
 	}
@@ -41,9 +48,9 @@ func capabilityWarnings(hc *container.HostConfig) []capWarning {
 	switch {
 	case hc.Privileged:
 		warnings = append(warnings, capWarning{"the container is privileged and can change its own network configuration, firewall rules do not restrict it", true})
-	case capHas(hc.CapAdd, "NET_ADMIN") || capHas(hc.CapAdd, "SYS_ADMIN"):
+	case capHas(hc.CapAdd, capNetAdmin) || capHas(hc.CapAdd, capSysAdmin):
 		warnings = append(warnings, capWarning{"the container has NET_ADMIN or SYS_ADMIN and can change its own addresses to get around its rules", true})
-	case !capHas(hc.CapDrop, "NET_RAW") || capHas(hc.CapAdd, "NET_RAW"):
+	case !capHas(hc.CapDrop, capNetRaw) || capHas(hc.CapAdd, capNetRaw):
 		warnings = append(warnings, capWarning{"the container keeps NET_RAW and can forge source addresses of other containers on its networks to get around its rules, add cap_drop: [NET_RAW]", false})
 	}
 
