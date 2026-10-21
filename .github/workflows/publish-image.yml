@@ -6,13 +6,6 @@ name: Publish image
 # publishes.
 
 on:
-  # only so that GitHub registers the workflow while it is not on the
-  # default branch; the job does nothing for this event
-  push:
-    branches:
-      - "claude/**"
-    paths:
-      - ".github/workflows/publish-image.yml"
   workflow_dispatch:
     inputs:
       tag:
@@ -24,7 +17,6 @@ permissions: {}
 
 jobs:
   publish:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
