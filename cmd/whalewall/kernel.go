@@ -27,6 +27,9 @@ func checkKernelSettings(logger *zap.Logger) {
 	} else if v != "1" {
 		logger.Warn("net.bridge.bridge-nf-call-iptables is not 1: traffic between containers on the same Docker network is not filtered", zap.String("value", v))
 	}
+	if v, ok := kernelSetting("/proc/sys/net/bridge/bridge-nf-call-ip6tables"); ok && v != "1" {
+		logger.Warn("net.bridge.bridge-nf-call-ip6tables is not 1: IPv6 traffic between containers on the same Docker network is not filtered", zap.String("value", v))
+	}
 	// connection tracking helpers (FTP, ...) open "related" connections
 	// that the rules accept without matching the destination
 	if v, ok := kernelSetting("/proc/sys/net/netfilter/nf_conntrack_helper"); ok && v == "1" {

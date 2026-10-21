@@ -8,9 +8,10 @@ import (
 )
 
 // family describes the nftables objects whalewall manages for one IP
-// family. Docker keeps the rules of each IP family in separate tables
-// that share the same name, so every object exists once per family.
+// family. Docker keeps IPv4 and IPv6 rules in separate tables that share
+// the same name, so every object exists once per family.
 type family struct {
+	v6             bool
 	table          *nftables.Table
 	whalewallChain *nftables.Chain
 	addrSet        *nftables.Set
@@ -32,28 +33,60 @@ var (
 		dstOffset:      dstAddrOffset,
 	}
 
-	families = []*family{family4}
+	filterTable6 = &nftables.Table{
+		Name:   filterTableName,
+		Family: nftables.TableFamilyIPv6,
+	}
+	whalewallChain6 = &nftables.Chain{
+		Name:  whalewallChainName,
+		Table: filterTable6,
+		Type:  nftables.ChainTypeFilter,
+	}
+	containerAddrSet6 = &nftables.Set{
+		Table:    filterTable6,
+		Name:     containerAddrSetName,
+		IsMap:    true,
+		KeyType:  nftables.TypeIP6Addr,
+		DataType: nftables.TypeVerdict,
+	}
+	family6 = &family{
+		v6:             true,
+		table:          filterTable6,
+		whalewallChain: whalewallChain6,
+		addrSet:        containerAddrSet6,
+		addrKeyType:    nftables.TypeIP6Addr,
+		addrLen:        16,
+		srcOffset:      8,
+		dstOffset:      24,
+	}
+
+	families = []*family{family4, family6}
 
 	srcJumpRule = family4.jumpRule(true)
 	dstJumpRule = family4.jumpRule(false)
 )
 
 func (f *family) String() string {
+	if f.v6 {
+		return "ipv6"
+	}
 	return "ipv4"
 }
 
 // familyOfTable returns the family a table belongs to.
-func familyOfTable(*nftables.Table) *family {
+func familyOfTable(t *nftables.Table) *family {
+	if t != nil && t.Family == nftables.TableFamilyIPv6 {
+		return family6
+	}
 	return family4
 }
 
-// familyOfAddr returns the family an address belongs to, or nil if
-// whalewall doesn't manage it.
+// familyOfAddr returns the family an address belongs to.
 func familyOfAddr(a netip.Addr) *family {
 	if a.Is4() || a.Is4In6() {
 		return family4
 	}
-	return nil
+	return family6
 }
 
 // addrBytes returns the address in the form it has in a packet header.

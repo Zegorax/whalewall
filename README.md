@@ -317,8 +317,7 @@ How it works: whalewall redirects all DNS traffic (UDP and TCP port 53) of conta
 rules to a resolver it runs, listening on the gateway address of the container's networks (default
 port 5353, see `-dns-port`). The resolver answers names that match one of the container's rules
 and returns `NXDOMAIN` for everything else, without forwarding denied names to the upstream
-resolver. The IPv4 addresses of an allowed answer (including those behind CNAMEs; whalewall manages IPv4 only, so
-`AAAA` queries get an empty answer) are added to a
+resolver. The addresses of an allowed answer (`A` and `AAAA`, including those behind CNAMEs) are added to a
 timed set in the container's rules before the answer is returned, so the first connection never
 races the rule. Entries expire after the record's TTL (at least `-dns-min-ttl`, plus `-dns-grace`);
 connections that are already established are not affected when an entry expires. Answers with loopback,
@@ -380,6 +379,21 @@ network, so it can use that container's rules; a container with `NET_ADMIN`, `SY
 (`cap_drop: [NET_RAW]` in compose) and don't grant the others; whalewall logs a message for each
 container that keeps one of these capabilities.
 
+### IPv6
+
+With the `-ipv6` flag whalewall manages IPv6 traffic of containers that have an IPv6 address, in addition
+to IPv4. Without it IPv6 traffic is not touched, as before (a warning is logged for containers that
+have an IPv6 address). This needs
+Docker's IPv6 firewalling to be enabled (`"ipv6": true` and `"ip6tables": true` in `daemon.json`,
+Docker 28 or newer) so that Docker creates the `DOCKER-USER` chain for IPv6. If a managed container
+has an IPv6 address and whalewall can't manage IPv6, whalewall logs an error and creates no rules
+for the container. Rules apply to both families: `ips` entries are used in the family they belong to,
+and everything else (ports, domains, containers) applies to both. ICMPv6 neighbor discovery (router
+solicitation, neighbor solicitation and advertisement) and packet too big messages are always allowed for
+managed containers since IPv6 can't work without them. Router advertisements and redirects are not: a
+container could use them to take over the IPv6 routes of the other containers on its network.
+`mapped_ports` rules are only supported for IPv4.
+
 ### Compatibility
 
 Everything new is off unless it is asked for, so updating whalewall does not change what it does for an
@@ -390,6 +404,7 @@ database is unchanged.
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `-dns` | off | Enables `domains` in rules and the DNS resolver (see "Domain rules"). |
+| `-ipv6` | off | Manages the IPv6 traffic of containers with an IPv6 address. |
 | `-isolate-invalid` | off | Drops all traffic of a container whose rules are invalid, instead of leaving it without rules. |
 
 Always on, and only informational: warnings about missing `br_netfilter`, enabled connection tracking
