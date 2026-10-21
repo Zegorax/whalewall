@@ -581,13 +581,11 @@ func (r *RuleManager) populateOutputRules(ctx context.Context, tx database.TX, c
 				estConts[cont.ID] = struct{}{}
 				found = true
 
-				var contAddrs []netip.Addr
 				addr, err := netip.ParseAddr(dstNetwork.IPAddress)
 				if err != nil {
 					return fmt.Errorf("error parsing IP of container %q from network %q: %w", ruleCfg.Container, dstNetName, err)
 				}
-				contAddrs = append(contAddrs, addr)
-				cfg.Output[i].contAddrs = contAddrs
+				cfg.Output[i].contAddrs = []netip.Addr{addr}
 				break
 			}
 
