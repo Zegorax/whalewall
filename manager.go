@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -57,8 +58,20 @@ type RuleManager struct {
 	createCh chan containerDetails
 	deleteCh chan string
 
+	// isolateInvalid is set by WithIsolateInvalidRules
+	isolateInvalid bool
+
 	db        database.DB
 	dockerCli dockerClient
+
+	dnsEnabled  bool
+	dnsOpts     DNSOptions
+	dns         dnsServer
+	dnsMtx      sync.Mutex
+	dnsPolicies map[string]*domainPolicy
+	local       *localAddrs
+	// interfaceAddrs lists the addresses of the host's interfaces
+	interfaceAddrs func() ([]net.Addr, error)
 }
 
 type dockerClientCreator func() (dockerClient, error)
@@ -70,7 +83,7 @@ type containerDetails struct {
 	isNew     bool
 }
 
-func NewRuleManager(ctx context.Context, logger *zap.Logger, dbFile string, timeout time.Duration) (*RuleManager, error) {
+func NewRuleManager(ctx context.Context, logger *zap.Logger, dbFile string, timeout time.Duration, opts ...Option) (*RuleManager, error) {
 	r := RuleManager{
 		stopping: make(chan struct{}),
 		done:     make(chan struct{}),
@@ -88,9 +101,13 @@ func NewRuleManager(ctx context.Context, logger *zap.Logger, dbFile string, time
 		newFirewallClient: func() (firewallClient, error) {
 			return nftables.New()
 		},
+		interfaceAddrs:   net.InterfaceAddrs,
 		containerTracker: container.NewTracker(logger),
 		createCh:         make(chan containerDetails),
 		deleteCh:         make(chan string),
+	}
+	for _, opt := range opts {
+		opt(&r)
 	}
 	err := r.initDB(ctx, dbFile)
 	if err != nil {
@@ -104,7 +121,12 @@ func (r *RuleManager) Start(ctx context.Context) error {
 	if err := r.init(ctx); err != nil {
 		return err
 	}
-	if err := r.createBaseRules(); err != nil {
+	if r.dnsEnabled {
+		if err := r.initDNS(); err != nil {
+			return err
+		}
+	}
+	if err := r.createFamilyBaseRules(family4); err != nil {
 		return fmt.Errorf("error creating base rules: %w", err)
 	}
 
@@ -292,6 +314,10 @@ func (r *RuleManager) Done() <-chan struct{} {
 func (r *RuleManager) Stop() {
 	close(r.stopping)
 	r.wg.Wait()
+
+	if r.dns != nil {
+		r.dns.Close()
+	}
 
 	if err := r.dockerCli.Close(); err != nil {
 		r.logger.Error("error closing docker client", zap.Error(err))
