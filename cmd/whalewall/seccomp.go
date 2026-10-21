@@ -10,6 +10,9 @@ import (
 	"gvisor.dev/gvisor/pkg/seccomp"
 )
 
+// mapDroppable is MAP_DROPPABLE, which is not defined by x/sys/unix.
+const mapDroppable = 0x8
+
 var allowedSyscalls = seccomp.SyscallRules{
 	unix.SYS_ACCESS: {
 		{
@@ -17,11 +20,25 @@ var allowedSyscalls = seccomp.SyscallRules{
 			seccomp.EqualTo(unix.F_OK),
 		},
 	},
+	// accepting DNS queries over TCP
+	unix.SYS_ACCEPT4: {},
 	unix.SYS_BIND: {
+		// netlink
 		{
 			seccomp.MatchAny{},
 			seccomp.MatchAny{},
 			seccomp.EqualTo(12),
+		},
+		// DNS resolver, IPv4 and IPv6 addresses
+		{
+			seccomp.MatchAny{},
+			seccomp.MatchAny{},
+			seccomp.EqualTo(16),
+		},
+		{
+			seccomp.MatchAny{},
+			seccomp.MatchAny{},
+			seccomp.EqualTo(28),
 		},
 	},
 	unix.SYS_CLOCK_GETTIME: {
@@ -123,6 +140,7 @@ var allowedSyscalls = seccomp.SyscallRules{
 			seccomp.EqualTo(0),
 		},
 	},
+	unix.SYS_GETRANDOM:   {},
 	unix.SYS_GETCWD:      {},
 	unix.SYS_GETEUID:     {},
 	unix.SYS_GETPEERNAME: {},
@@ -145,6 +163,7 @@ var allowedSyscalls = seccomp.SyscallRules{
 		},
 	},
 	unix.SYS_GETTID:  {},
+	unix.SYS_LISTEN:  {},
 	unix.SYS_LSEEK:   {},
 	unix.SYS_LSTAT:   {},
 	unix.SYS_MADVISE: {},
@@ -173,6 +192,16 @@ var allowedSyscalls = seccomp.SyscallRules{
 			seccomp.GreaterThan(0),
 			seccomp.EqualTo(0),
 		},
+		// state for the vDSO getrandom implementation, used to generate
+		// DNS message IDs
+		{
+			seccomp.MatchAny{},
+			seccomp.MatchAny{},
+			seccomp.EqualTo(unix.PROT_READ | unix.PROT_WRITE),
+			seccomp.EqualTo(mapDroppable | unix.MAP_ANONYMOUS),
+			seccomp.GreaterThan(0),
+			seccomp.EqualTo(0),
+		},
 	},
 	unix.SYS_MUNMAP:     {},
 	unix.SYS_NANOSLEEP:  {},
@@ -197,6 +226,8 @@ var allowedSyscalls = seccomp.SyscallRules{
 	unix.SYS_RT_SIGPROCMASK:  {},
 	unix.SYS_RT_SIGRETURN:    {},
 	unix.SYS_SCHED_YIELD:     {},
+	unix.SYS_RECVFROM:        {},
+	unix.SYS_SENDTO:          {},
 	unix.SYS_SENDMSG: {
 		{
 			seccomp.MatchAny{},
@@ -205,6 +236,28 @@ var allowedSyscalls = seccomp.SyscallRules{
 		},
 	},
 	unix.SYS_SETSOCKOPT: {
+		// DNS resolver sockets
+		{
+			seccomp.MatchAny{},
+			seccomp.EqualTo(unix.SOL_SOCKET),
+			seccomp.EqualTo(unix.SO_REUSEADDR),
+			seccomp.MatchAny{},
+			seccomp.EqualTo(4),
+		},
+		{
+			seccomp.MatchAny{},
+			seccomp.EqualTo(unix.SOL_IP),
+			seccomp.EqualTo(unix.IP_PKTINFO),
+			seccomp.MatchAny{},
+			seccomp.EqualTo(4),
+		},
+		{
+			seccomp.MatchAny{},
+			seccomp.EqualTo(unix.SOL_IPV6),
+			seccomp.EqualTo(unix.IPV6_RECVPKTINFO),
+			seccomp.MatchAny{},
+			seccomp.EqualTo(4),
+		},
 		{
 			seccomp.MatchAny{},
 			seccomp.EqualTo(unix.SOL_SOCKET),
@@ -237,6 +290,13 @@ var allowedSyscalls = seccomp.SyscallRules{
 			seccomp.MatchAny{},
 			seccomp.EqualTo(unix.SOL_TCP),
 			seccomp.EqualTo(unix.TCP_KEEPINTVL),
+			seccomp.MatchAny{},
+			seccomp.EqualTo(4),
+		},
+		{
+			seccomp.MatchAny{},
+			seccomp.EqualTo(unix.SOL_TCP),
+			seccomp.EqualTo(unix.TCP_KEEPCNT),
 			seccomp.MatchAny{},
 			seccomp.EqualTo(4),
 		},
@@ -284,6 +344,12 @@ var allowedSyscalls = seccomp.SyscallRules{
 			seccomp.EqualTo(unix.SOCK_RAW | unix.SOCK_NONBLOCK | unix.SOCK_CLOEXEC),
 			seccomp.EqualTo(unix.NETLINK_NETFILTER),
 		},
+		// listing the host's addresses, see (*RuleManager).loadLocalAddrs
+		{
+			seccomp.EqualTo(unix.AF_NETLINK),
+			seccomp.EqualTo(unix.SOCK_RAW | unix.SOCK_CLOEXEC),
+			seccomp.EqualTo(unix.NETLINK_ROUTE),
+		},
 	},
 	unix.SYS_STAT: {},
 	unix.SYS_TGKILL: {
@@ -291,8 +357,11 @@ var allowedSyscalls = seccomp.SyscallRules{
 			seccomp.EqualTo(uint64(os.Getpid())),
 		},
 	},
-	unix.SYS_TIME:  {},
-	unix.SYS_WRITE: {},
+	// SQLite removes the write-ahead log when the database is closed;
+	// landlock only allows this for files it was given access to
+	unix.SYS_UNLINK: {},
+	unix.SYS_TIME:   {},
+	unix.SYS_WRITE:  {},
 }
 
 type nullEmitter struct{}

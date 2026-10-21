@@ -15,6 +15,7 @@ type dockerClient interface {
 	Events(ctx context.Context, options types.EventsOptions) (<-chan events.Message, <-chan error)
 	ContainerList(ctx context.Context, options types.ContainerListOptions) ([]types.Container, error)
 	ContainerInspect(ctx context.Context, containerID string) (types.ContainerJSON, error)
+	NetworkList(ctx context.Context, options types.NetworkListOptions) ([]types.NetworkResource, error)
 	Close() error
 }
 
@@ -23,6 +24,7 @@ type mockDockerClient struct {
 
 	eventCh    chan events.Message
 	containers []types.ContainerJSON
+	networks   []types.NetworkResource
 }
 
 func newMockDockerClient(containers []types.ContainerJSON) *mockDockerClient {
@@ -68,6 +70,13 @@ func (m *mockDockerClient) ContainerInspect(_ context.Context, containerID strin
 	}
 
 	return m.containers[i], nil
+}
+
+func (m *mockDockerClient) NetworkList(_ context.Context, _ types.NetworkListOptions) ([]types.NetworkResource, error) {
+	m.mtx.RLock()
+	defer m.mtx.RUnlock()
+
+	return slices.Clone(m.networks), nil
 }
 
 func (m *mockDockerClient) Close() error {

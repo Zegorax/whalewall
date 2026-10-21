@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/google/nftables"
@@ -16,15 +17,18 @@ import (
 
 const anonSetName = "__set%d"
 
-var setAllocNum = 1
+// setAllocNum is shared by all mock firewalls, which are used concurrently
+var setAllocNum atomic.Uint32
 
 type firewallClient interface {
 	AddTable(t *nftables.Table) *nftables.Table
+	DelTable(t *nftables.Table)
 
 	AddChain(c *nftables.Chain) *nftables.Chain
 	DelChain(c *nftables.Chain)
 	ListChainsOfTableFamily(family nftables.TableFamily) ([]*nftables.Chain, error)
 
+	GetSets(t *nftables.Table) ([]*nftables.Set, error)
 	AddSet(s *nftables.Set, vals []nftables.SetElement) error
 	DelSet(s *nftables.Set)
 	SetAddElements(s *nftables.Set, vals []nftables.SetElement) error
@@ -130,8 +134,8 @@ func (m *mockFirewallCreator) writeBaseFirewall(f func(base *mockFirewall)) {
 func (m *mockFirewall) AddTable(t *nftables.Table) *nftables.Table {
 	m.changed = true
 
-	if _, ok := m.tables[t.Name]; !ok {
-		m.tables[t.Name] = &table{
+	if _, ok := m.tables[tkey(t)]; !ok {
+		m.tables[tkey(t)] = &table{
 			Sets:        make(setMap),
 			newAnonSets: make(map[string]bool),
 		}
@@ -140,11 +144,68 @@ func (m *mockFirewall) AddTable(t *nftables.Table) *nftables.Table {
 	return t
 }
 
+// tkey returns the key a table is stored under; IPv4 tables keep their
+// name as key so tests can look them up by name.
+func tkey(t *nftables.Table) string {
+	if t != nil && t.Family == nftables.TableFamilyIPv6 {
+		return "ip6:" + t.Name
+	}
+	return t.Name
+}
+
+func ckey(c *nftables.Chain) string {
+	if c.Table != nil && c.Table.Family == nftables.TableFamilyIPv6 {
+		return "ip6:" + c.Name
+	}
+	return c.Name
+}
+
+func ckeyIn(t *nftables.Table, c *nftables.Chain) string {
+	if t != nil && t.Family == nftables.TableFamilyIPv6 {
+		return "ip6:" + c.Name
+	}
+	return c.Name
+}
+
+func (m *mockFirewall) DelTable(t *nftables.Table) {
+	m.changed = true
+
+	if _, ok := m.tables[tkey(t)]; !ok {
+		m.flushErr = syscall.ENOENT
+		return
+	}
+	delete(m.tables, tkey(t))
+	for key, c := range m.chains {
+		if c.Chain.Table != nil && tkey(c.Chain.Table) == tkey(t) {
+			delete(m.chains, key)
+		}
+	}
+}
+
+func (m *mockFirewall) GetSets(t *nftables.Table) ([]*nftables.Set, error) {
+	var (
+		sets []*nftables.Set
+		err  error
+	)
+	m.bf.readBaseFirewall(func(base *mockFirewall) {
+		bt, ok := base.tables[tkey(t)]
+		if !ok {
+			err = syscall.ENOENT
+			return
+		}
+		for name := range bt.Sets {
+			sets = append(sets, &nftables.Set{Table: t, Name: name})
+		}
+	})
+
+	return sets, err
+}
+
 func (m *mockFirewall) AddChain(c *nftables.Chain) *nftables.Chain {
 	m.changed = true
 
-	if _, ok := m.chains[c.Name]; !ok {
-		m.chains[c.Name] = chain{
+	if _, ok := m.chains[ckey(c)]; !ok {
+		m.chains[ckey(c)] = chain{
 			Chain: c,
 		}
 	}
@@ -155,7 +216,7 @@ func (m *mockFirewall) AddChain(c *nftables.Chain) *nftables.Chain {
 func (m *mockFirewall) DelChain(c *nftables.Chain) {
 	m.changed = true
 
-	chain, ok := m.chains[c.Name]
+	chain, ok := m.chains[ckey(c)]
 	if !ok {
 		m.logger.Errorf("chain %q not found", c.Name)
 		m.flushErr = syscall.ENOENT
@@ -167,7 +228,7 @@ func (m *mockFirewall) DelChain(c *nftables.Chain) {
 		m.delRule(rule, true)
 	}
 
-	delete(m.chains, c.Name)
+	delete(m.chains, ckey(c))
 }
 
 func (m *mockFirewall) ListChainsOfTableFamily(family nftables.TableFamily) ([]*nftables.Chain, error) {
@@ -186,7 +247,7 @@ func (m *mockFirewall) ListChainsOfTableFamily(family nftables.TableFamily) ([]*
 func (m *mockFirewall) AddSet(s *nftables.Set, vals []nftables.SetElement) error {
 	m.changed = true
 
-	t, ok := m.tables[s.Table.Name]
+	t, ok := m.tables[tkey(s.Table)]
 	if !ok {
 		m.logger.Errorf("table %q not found", s.Table.Name)
 		m.flushErr = syscall.ENOENT
@@ -195,11 +256,11 @@ func (m *mockFirewall) AddSet(s *nftables.Set, vals []nftables.SetElement) error
 
 	setName := s.Name
 	if s.Anonymous {
-		setName = fmt.Sprintf(anonSetName, setAllocNum)
-		s.ID = uint32(setAllocNum)
+		id := setAllocNum.Add(1)
+		setName = fmt.Sprintf(anonSetName, id)
+		s.ID = id
 		s.Name = anonSetName
 
-		setAllocNum++
 		t.newAnonSets[setName] = false
 	}
 
@@ -208,7 +269,7 @@ func (m *mockFirewall) AddSet(s *nftables.Set, vals []nftables.SetElement) error
 		return nil
 	}
 	t.Sets[setName] = vals
-	m.tables[s.Table.Name] = t
+	m.tables[tkey(s.Table)] = t
 
 	return nil
 }
@@ -216,7 +277,7 @@ func (m *mockFirewall) AddSet(s *nftables.Set, vals []nftables.SetElement) error
 func (m *mockFirewall) DelSet(s *nftables.Set) {
 	m.changed = true
 
-	t, ok := m.tables[s.Table.Name]
+	t, ok := m.tables[tkey(s.Table)]
 	if !ok {
 		m.logger.Errorf("table %q not found", s.Table.Name)
 		m.flushErr = syscall.ENOENT
@@ -224,13 +285,13 @@ func (m *mockFirewall) DelSet(s *nftables.Set) {
 	}
 
 	delete(t.Sets, s.Name)
-	m.tables[s.Table.Name] = t
+	m.tables[tkey(s.Table)] = t
 }
 
 func (m *mockFirewall) SetAddElements(s *nftables.Set, vals []nftables.SetElement) error {
 	m.changed = true
 
-	t, ok := m.tables[s.Table.Name]
+	t, ok := m.tables[tkey(s.Table)]
 	if !ok {
 		m.logger.Errorf("table %q not found", s.Table.Name)
 		m.flushErr = syscall.ENOENT
@@ -280,7 +341,7 @@ func (m *mockFirewall) SetAddElements(s *nftables.Set, vals []nftables.SetElemen
 	}
 
 	t.Sets[s.Name] = elements
-	m.tables[s.Table.Name] = t
+	m.tables[tkey(s.Table)] = t
 
 	return nil
 }
@@ -288,7 +349,7 @@ func (m *mockFirewall) SetAddElements(s *nftables.Set, vals []nftables.SetElemen
 func (m *mockFirewall) SetDeleteElements(s *nftables.Set, vals []nftables.SetElement) error {
 	m.changed = true
 
-	t, ok := m.tables[s.Table.Name]
+	t, ok := m.tables[tkey(s.Table)]
 	if !ok {
 		m.logger.Errorf("table %q not found", s.Table.Name)
 		m.flushErr = syscall.ENOENT
@@ -323,7 +384,7 @@ func (m *mockFirewall) SetDeleteElements(s *nftables.Set, vals []nftables.SetEle
 		elements = slices.Delete(elements, i, i+1)
 	}
 	t.Sets[s.Name] = elements
-	m.tables[s.Table.Name] = t
+	m.tables[tkey(s.Table)] = t
 
 	return nil
 }
@@ -331,13 +392,13 @@ func (m *mockFirewall) SetDeleteElements(s *nftables.Set, vals []nftables.SetEle
 func (m *mockFirewall) AddRule(r *nftables.Rule) *nftables.Rule {
 	m.changed = true
 
-	t, ok := m.tables[r.Table.Name]
+	t, ok := m.tables[tkey(r.Table)]
 	if !ok {
 		m.logger.Errorf("table %q not found", r.Table.Name)
 		m.flushErr = syscall.ENOENT
 		return r
 	}
-	c, ok := m.chains[r.Chain.Name]
+	c, ok := m.chains[ckey(r.Chain)]
 	if !ok {
 		m.logger.Errorf("chain %q not found", r.Chain.Name)
 		m.flushErr = syscall.ENOENT
@@ -350,7 +411,7 @@ func (m *mockFirewall) AddRule(r *nftables.Rule) *nftables.Rule {
 	m.checkRule(rCopy, t)
 
 	c.Rules = append(c.Rules, rCopy)
-	m.chains[r.Chain.Name] = c
+	m.chains[ckey(r.Chain)] = c
 
 	return r
 }
@@ -364,12 +425,12 @@ func (m *mockFirewall) DelRule(r *nftables.Rule) error {
 }
 
 func (m *mockFirewall) delRule(r *nftables.Rule, softDel bool) {
-	if _, ok := m.tables[r.Table.Name]; !ok {
+	if _, ok := m.tables[tkey(r.Table)]; !ok {
 		m.logger.Errorf("table %q not found", r.Table.Name)
 		m.flushErr = syscall.ENOENT
 		return
 	}
-	c, ok := m.chains[r.Chain.Name]
+	c, ok := m.chains[ckey(r.Chain)]
 	if !ok {
 		m.logger.Errorf("chain %q not found", r.Chain.Name)
 		m.flushErr = syscall.ENOENT
@@ -400,20 +461,20 @@ func (m *mockFirewall) delRule(r *nftables.Rule, softDel bool) {
 
 	if !softDel {
 		c.Rules = slices.Delete(c.Rules, i, i+1)
-		m.chains[r.Chain.Name] = c
+		m.chains[ckey(r.Chain)] = c
 	}
 }
 
 func (m *mockFirewall) InsertRule(r *nftables.Rule) *nftables.Rule {
 	m.changed = true
 
-	t, ok := m.tables[r.Table.Name]
+	t, ok := m.tables[tkey(r.Table)]
 	if !ok {
 		m.logger.Errorf("table %q not found", r.Table.Name)
 		m.flushErr = syscall.ENOENT
 		return r
 	}
-	c, ok := m.chains[r.Chain.Name]
+	c, ok := m.chains[ckey(r.Chain)]
 	if !ok {
 		m.logger.Errorf("chain %q not found", r.Chain.Name)
 		m.flushErr = syscall.ENOENT
@@ -426,7 +487,7 @@ func (m *mockFirewall) InsertRule(r *nftables.Rule) *nftables.Rule {
 	m.checkRule(rCopy, t)
 
 	c.Rules = slices.Insert(c.Rules, 0, rCopy)
-	m.chains[r.Chain.Name] = c
+	m.chains[ckey(r.Chain)] = c
 
 	return r
 }
@@ -456,7 +517,7 @@ func (m *mockFirewall) GetRules(t *nftables.Table, c *nftables.Chain) ([]*nftabl
 	var rules []*nftables.Rule
 	var err error
 	m.bf.readBaseFirewall(func(base *mockFirewall) {
-		ch, ok := base.chains[c.Name]
+		ch, ok := base.chains[ckeyIn(t, c)]
 		if !ok {
 			err = syscall.ENOENT
 			return
