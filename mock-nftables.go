@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/google/nftables"
@@ -16,15 +17,18 @@ import (
 
 const anonSetName = "__set%d"
 
-var setAllocNum = 1
+// setAllocNum is shared by all mock firewalls, which are used concurrently
+var setAllocNum atomic.Uint32
 
 type firewallClient interface {
 	AddTable(t *nftables.Table) *nftables.Table
+	DelTable(t *nftables.Table)
 
 	AddChain(c *nftables.Chain) *nftables.Chain
 	DelChain(c *nftables.Chain)
 	ListChainsOfTableFamily(family nftables.TableFamily) ([]*nftables.Chain, error)
 
+	GetSets(t *nftables.Table) ([]*nftables.Set, error)
 	AddSet(s *nftables.Set, vals []nftables.SetElement) error
 	DelSet(s *nftables.Set)
 	SetAddElements(s *nftables.Set, vals []nftables.SetElement) error
@@ -140,6 +144,40 @@ func (m *mockFirewall) AddTable(t *nftables.Table) *nftables.Table {
 	return t
 }
 
+func (m *mockFirewall) DelTable(t *nftables.Table) {
+	m.changed = true
+
+	if _, ok := m.tables[t.Name]; !ok {
+		m.flushErr = syscall.ENOENT
+		return
+	}
+	delete(m.tables, t.Name)
+	for key, c := range m.chains {
+		if c.Chain.Table != nil && c.Chain.Table.Name == t.Name {
+			delete(m.chains, key)
+		}
+	}
+}
+
+func (m *mockFirewall) GetSets(t *nftables.Table) ([]*nftables.Set, error) {
+	var (
+		sets []*nftables.Set
+		err  error
+	)
+	m.bf.readBaseFirewall(func(base *mockFirewall) {
+		bt, ok := base.tables[t.Name]
+		if !ok {
+			err = syscall.ENOENT
+			return
+		}
+		for name := range bt.Sets {
+			sets = append(sets, &nftables.Set{Table: t, Name: name})
+		}
+	})
+
+	return sets, err
+}
+
 func (m *mockFirewall) AddChain(c *nftables.Chain) *nftables.Chain {
 	m.changed = true
 
@@ -195,11 +233,11 @@ func (m *mockFirewall) AddSet(s *nftables.Set, vals []nftables.SetElement) error
 
 	setName := s.Name
 	if s.Anonymous {
-		setName = fmt.Sprintf(anonSetName, setAllocNum)
-		s.ID = uint32(setAllocNum)
+		id := setAllocNum.Add(1)
+		setName = fmt.Sprintf(anonSetName, id)
+		s.ID = id
 		s.Name = anonSetName
 
-		setAllocNum++
 		t.newAnonSets[setName] = false
 	}
 

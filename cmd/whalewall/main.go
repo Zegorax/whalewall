@@ -35,6 +35,13 @@ func mainRetCode() int {
 	debugLogs := flag.Bool("debug", false, "enable debug logging")
 	logPath := flag.String("l", "stdout", "path to log to")
 	timeout := flag.Duration("t", 10*time.Second, "timeout for Docker API requests")
+	dnsEnabled := flag.Bool("dns", false, "enable rules that allow traffic by domain name; starts a DNS resolver that managed containers' DNS queries are redirected to")
+	dnsPort := flag.Uint("dns-port", 5353, "port the DNS resolver listens on, on the gateway address of each managed network")
+	dnsUpstream := flag.String("dns-upstream", "", "comma-separated host:port list of upstream DNS servers; defaults to the servers in /etc/resolv.conf")
+	dnsMinTTL := flag.Duration("dns-min-ttl", 30*time.Second, "minimum time an address resolved from an allowed domain stays allowed")
+	dnsMaxTTL := flag.Duration("dns-max-ttl", time.Hour, "maximum time an address resolved from an allowed domain stays allowed, whatever the TTL of the record is")
+	dnsGrace := flag.Duration("dns-grace", 5*time.Second, "time added to the TTL of every resolved address")
+	isolateInvalid := flag.Bool("isolate-invalid", false, "drop all traffic of a container whose rules are invalid; by default a container with invalid rules gets no rules and is not restricted")
 	displayVersion := flag.Bool("version", false, "print version and build information and exit")
 	flag.Parse()
 
@@ -81,6 +88,10 @@ func mainRetCode() int {
 		}
 	}
 
+	// warn about host settings that make the rules ineffective; this has to
+	// happen before privileges are dropped as it reads from /proc/sys
+	checkKernelSettings(logger)
+
 	// create rule manager and drop unneeded privileges
 	dataDirAbs, err := filepath.Abs(*dataDir)
 	if err != nil {
@@ -92,7 +103,34 @@ func mainRetCode() int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	r, err := whalewall.NewRuleManager(ctx, logger, sqliteFile, *timeout)
+	// every flag that adds behavior is off by default and becomes an
+	// option; without any whalewall behaves like previous versions
+	var opts []whalewall.Option
+	if *isolateInvalid {
+		opts = append(opts, whalewall.WithIsolateInvalidRules())
+	}
+	if *dnsEnabled {
+		// flag.Uint is wider than a port
+		if *dnsPort == 0 || *dnsPort > 65535 {
+			logger.Error("invalid DNS port", zap.Uint("dns.port", *dnsPort))
+			return 1
+		}
+		dnsOpts := whalewall.DNSOptions{
+			Port:   uint16(*dnsPort),
+			MinTTL: *dnsMinTTL,
+			MaxTTL: *dnsMaxTTL,
+			Grace:  *dnsGrace,
+		}
+		// without upstreams the resolver uses the host's /etc/resolv.conf
+		if *dnsUpstream != "" {
+			for _, up := range strings.Split(*dnsUpstream, ",") {
+				dnsOpts.Upstreams = append(dnsOpts.Upstreams, strings.TrimSpace(up))
+			}
+		}
+		opts = append(opts, whalewall.WithDNS(dnsOpts))
+	}
+
+	r, err := whalewall.NewRuleManager(ctx, logger, sqliteFile, *timeout, opts...)
 	if err != nil {
 		logger.Error("error initializing", zap.Error(err))
 	}
