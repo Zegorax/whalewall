@@ -72,7 +72,7 @@ func retryIfBusy[T any](f func() (T, error)) (T, error) {
 	var ret T
 	var err error
 
-	for i := 0; i < retries; i++ {
+	for range retries {
 		ret, err = f()
 		if err == nil {
 			return ret, nil

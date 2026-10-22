@@ -48,6 +48,9 @@ jobs:
       - name: Restore Go cache
         uses: capnspacehook/cache-go/restore@v2.0.1
 
+      # the DNS resolver does not need privileges, test it separately
+      - run: go test -race -count=1 ./dnsproxy/
+
       # the test is compiled and run as root so that whalewall can
       # interface with nftables, which is a privileged operation
       - run: |
