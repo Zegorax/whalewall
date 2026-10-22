@@ -7,9 +7,11 @@ require (
 	github.com/docker/go-connections v0.5.0
 	github.com/google/nftables v0.2.0
 	github.com/landlock-lsm/go-landlock v0.0.0-20230212201647-821adaecc1a5
+	github.com/miekg/dns v1.1.62
 	go.uber.org/zap v1.27.0
 	go4.org/netipx v0.0.0-20220812043211-3cc044ffd68d
 	golang.org/x/exp v0.0.0-20230725093048-515e97ebf090
+	golang.org/x/net v0.27.0
 	golang.org/x/sys v0.25.0
 	gopkg.in/yaml.v3 v3.0.1
 	gvisor.dev/gvisor v0.0.0-20230811195211-463ea554e02f
@@ -44,11 +46,11 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	go.uber.org/multierr v1.10.0 // indirect
-	golang.org/x/mod v0.11.0 // indirect
-	golang.org/x/net v0.22.0 // indirect
-	golang.org/x/sync v0.6.0 // indirect
+	golang.org/x/mod v0.18.0 // indirect
+	golang.org/x/sync v0.7.0 // indirect
+	golang.org/x/text v0.16.0 // indirect
 	golang.org/x/time v0.0.0-20220210224613-90d013bbcef8 // indirect
-	golang.org/x/tools v0.5.0 // indirect
+	golang.org/x/tools v0.22.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127 // indirect
 	kernel.org/pub/linux/libs/security/libcap/psx v1.2.66 // indirect
 	lukechampine.com/uint128 v1.2.0 // indirect

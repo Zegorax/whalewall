@@ -32,6 +32,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # traffic between containers on a bridge is only seen by nftables
+      # with br_netfilter, which the runner image doesn't load
+      - name: Enable br_netfilter
+        run: |
+          sudo modprobe br_netfilter
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
+
       - name: Install Go
         uses: actions/setup-go@v6.3.0
         with:
@@ -40,6 +47,9 @@ jobs:
 
       - name: Restore Go cache
         uses: capnspacehook/cache-go/restore@v2.0.1
+
+      # the DNS resolver does not need privileges, test it separately
+      - run: go test -race -count=1 ./dnsproxy/
 
       # the test is compiled and run as root so that whalewall can
       # interface with nftables, which is a privileged operation
@@ -57,6 +67,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # traffic between containers on a bridge is only seen by nftables
+      # with br_netfilter, which the runner image doesn't load
+      - name: Enable br_netfilter
+        run: |
+          sudo modprobe br_netfilter
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
 
       - name: Install Go
         uses: actions/setup-go@v6.3.0
@@ -86,6 +103,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # traffic between containers on a bridge is only seen by nftables
+      # with br_netfilter, which the runner image doesn't load
+      - name: Enable br_netfilter
+        run: |
+          sudo modprobe br_netfilter
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
 
       - name: Install Docker buildx
         uses: docker/setup-buildx-action@v3

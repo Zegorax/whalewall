@@ -36,60 +36,36 @@ var (
 		KeyType:  nftables.TypeIPAddr,
 		DataType: nftables.TypeVerdict,
 	}
-
-	srcJumpRule = &nftables.Rule{
-		Table: filterTable,
-		Chain: whalewallChain,
-		Exprs: []expr.Any{
-			// [ payload load 4b @ network header + 12 => reg 1 ]
-			&expr.Payload{
-				OperationType: expr.PayloadLoad,
-				Len:           4,
-				Base:          expr.PayloadBaseNetworkHeader,
-				Offset:        12,
-				DestRegister:  1,
-			},
-			// [ lookup reg 1 set ... dreg 0 0x0 ]
-			&expr.Lookup{
-				SourceRegister: 1,
-				SetName:        containerAddrSetName,
-				DestRegister:   0,
-				IsDestRegSet:   true,
-			},
-		},
-	}
-	dstJumpRule = &nftables.Rule{
-		Table: filterTable,
-		Chain: whalewallChain,
-		Exprs: []expr.Any{
-			// [ payload load 4b @ network header + 16 => reg 1 ]
-			&expr.Payload{
-				OperationType: expr.PayloadLoad,
-				Len:           4,
-				Base:          expr.PayloadBaseNetworkHeader,
-				Offset:        16,
-				DestRegister:  1,
-			},
-			// [ lookup reg 1 set ... dreg 0 0x0 ]
-			&expr.Lookup{
-				SourceRegister: 1,
-				SetName:        containerAddrSetName,
-				DestRegister:   0,
-				IsDestRegSet:   true,
-			},
-		},
-	}
 )
 
+// errNoDockerChain is returned if Docker hasn't created its chains for
+// a family, which is the case for IPv6 when Docker's ip6tables support
+// is disabled.
+var errNoDockerChain = errors.New("couldn't find required Docker chain, is Docker running?")
+
+// createBaseRules creates the rules and sets all container chains
+// depend on for IPv4, which whalewall always manages.
 func (r *RuleManager) createBaseRules() error {
+	return r.createFamilyBaseRules(family4)
+}
+
+// createFamilyBaseRules creates what the container chains of an IP family
+// depend on: the whalewall chain, jump rules to it from Docker's chains, and
+// the set that maps container addresses to their chains. The jump rules
+// are the same for every family and are built from the family's address
+// offsets and length (see family.jumpRule).
+func (r *RuleManager) createFamilyBaseRules(fam *family) error {
+	filterTable, whalewallChain := fam.table, fam.whalewallChain
+	srcJumpRule, dstJumpRule := fam.jumpRule(true), fam.jumpRule(false)
+
 	nfc, err := r.newFirewallClient()
 	if err != nil {
 		return fmt.Errorf("error creating netlink connection: %w", err)
 	}
 
-	chains, err := nfc.ListChainsOfTableFamily(nftables.TableFamilyIPv4)
+	chains, err := nfc.ListChainsOfTableFamily(filterTable.Family)
 	if err != nil {
-		return fmt.Errorf("error listing IPv4 chains: %w", err)
+		return fmt.Errorf("error listing %s chains: %w", fam, err)
 	}
 	var (
 		whalewallChainFound bool
@@ -114,7 +90,7 @@ func (r *RuleManager) createBaseRules() error {
 		}
 	}
 	if dockerChain == nil {
-		return errors.New("couldn't find required Docker chain, is Docker running?")
+		return errNoDockerChain
 	}
 
 	// get or create whalewall chain
@@ -181,7 +157,7 @@ func (r *RuleManager) createBaseRules() error {
 	}
 
 	// create a map that maps container IPs to their respective chain
-	if err := nfc.AddSet(containerAddrSet, nil); err != nil {
+	if err := nfc.AddSet(fam.addrSet, nil); err != nil {
 		return fmt.Errorf("error adding set %q: %w", containerAddrSetName, err)
 	}
 
@@ -201,9 +177,11 @@ func (r *RuleManager) createBaseRules() error {
 	return nil
 }
 
+// createJumpRule returns a rule that jumps from srcChain to the chain
+// named dstChainName, in the table of srcChain.
 func createJumpRule(srcChain *nftables.Chain, dstChainName string) *nftables.Rule {
 	return &nftables.Rule{
-		Table: filterTable,
+		Table: srcChain.Table,
 		Chain: srcChain,
 		Exprs: []expr.Any{
 			&expr.Counter{},

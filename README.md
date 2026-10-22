@@ -6,6 +6,12 @@ Automate management of firewall rules for Docker containers.
 
 Linux with a recent kernel, around 5.10 or newer.
 
+Filtering traffic between containers on the same Docker network needs the `br_netfilter` kernel
+module (`modprobe br_netfilter`, `net.bridge.bridge-nf-call-iptables=1`); without it that traffic
+never reaches the firewall. Connection tracking helpers should be off
+(`net.netfilter.nf_conntrack_helper=0`, the default), they can open connections that rules did not
+allow. Whalewall checks both when it starts and logs a warning if they are wrong.
+
 ## Purpose
 
 Docker by default creates iptables rules to handle container traffic that override almost all user-set
@@ -239,6 +245,9 @@ output:
     network: ""
     # optional; a list of IP addresses, CIDRs, or ranges of IP addresses to allow traffic to
     ips: []
+    # optional; a list of domain names to allow traffic to, see "Domain rules". Needs the -dns flag.
+    # Mutually exclusive with 'ips', 'network' and 'container'; 'proto' and 'dst_ports' are required
+    domains: []
     # optional; a container to allow traffic to. This can be either the name of the container or
     # the service name of the container is docker compose is used
     container: ""
@@ -269,6 +278,139 @@ Port and IP ranges are inclusive. Examples:
 
 - `4000-5000` will match all ports between and including port 4000 and port 5000
 - `1.1.1.1-2.2.2.2` will match all IPs between and including 1.1.1.1 and 2.2.2.2
+
+### Domain rules
+
+With the `-dns` flag whalewall can allow outbound traffic by domain name instead of by IP address.
+This is meant for containers that should be isolated except for a few services:
+
+```yaml
+services:
+  app:
+    image: example/app
+    # any address, see below
+    dns: ["192.0.2.53"]
+    labels:
+      whalewall.enabled: true
+      whalewall.rules: |
+        output:
+          - domains:
+              - api.github.com
+              - "*.githubusercontent.com"
+              - "**.cdn.example.net"
+            proto: tcp
+            dst_ports: [443]
+```
+
+Domains are matched like this:
+
+| Entry | Matches | Does not match |
+|---|---|---|
+| `api.github.com` | exactly that name | any other name |
+| `*.example.com` | exactly one label below: `a.example.com` | `example.com`, `a.b.example.com` |
+| `**.example.com` | one or more labels, any depth: `a.example.com`, `a.b.c.example.com` | `example.com` |
+
+To allow a name and everything below it, list both `example.com` and `**.example.com`. `*` and `**` are
+only valid as the entire first label.
+
+How it works: whalewall redirects all DNS traffic (UDP and TCP port 53) of containers that have domain
+rules to a resolver it runs, listening on the gateway address of the container's networks (default
+port 5353, see `-dns-port`). The resolver answers names that match one of the container's rules
+and returns `NXDOMAIN` for everything else, without forwarding denied names to the upstream
+resolver. The addresses of an allowed answer (`A` and `AAAA`, including those behind CNAMEs) are added to a
+timed set in the container's rules before the answer is returned, so the first connection never
+races the rule. Entries expire after the record's TTL (at least `-dns-min-ttl`, plus `-dns-grace`);
+connections that are already established are not affected when an entry expires. Answers with loopback,
+link-local, multicast or unspecified addresses are dropped.
+
+Requirements and behavior to be aware of:
+
+- **The container must set the `dns` option** (to any address, for example `192.0.2.53`). Docker's
+embedded resolver (`127.0.0.11`) forwards queries from the host's network namespace unless the
+container has custom DNS servers, and queries from the host can't be attributed to a container.
+If a container has domain rules but no `dns` option, whalewall logs an error and, with `-isolate-invalid`,
+drops all of the container's traffic; without it the container gets no rules and is not restricted. The same
+applies if the rules are invalid, or if `-dns` is not set. Use `-isolate-invalid` together with domain rules.
+- Other DNS transports are covered by the default drop: DNS over TLS (port 853) and DNS over HTTPS
+only work to addresses that were allowed.
+- An allowed address is open to every name that lives behind it. If an allowed domain shares an IP
+with other sites (a CDN), those are reachable by connecting to the IP directly.
+- Wildcard domains allow tunneling data through DNS queries to the allowed zone. Prefer exact names
+where possible.
+- Rules without `domains` are not affected by `-dns`, and containers without domain rules keep their
+DNS traffic untouched.
+
+Flags: `-dns`, `-dns-port` (default 5353), `-dns-upstream` (comma-separated `host:port` list, default the
+servers in `/etc/resolv.conf`), `-dns-min-ttl` (default 30s), `-dns-max-ttl` (default 1h, caps
+huge TTLs) and `-dns-grace` (default 5s).
+
+Hardening applied to resolved answers:
+
+- Addresses that are loopback, link-local, multicast or unspecified, the host's own addresses and the
+gateways of Docker bridge networks are removed from answers, so an allowed name can not be made to
+point at the host (DNS rebinding). If nothing is left the container gets an empty answer.
+- At most 64 addresses are accepted per answer, and every TTL is clamped to the
+`-dns-min-ttl`/`-dns-max-ttl` range.
+- Queries that are not class IN, zone transfers (AXFR/IXFR), ANY queries and names with unusual
+characters are refused. Look-alike names (other-case Unicode, trailing dots, embedded NULs) never match.
+
+Resource limits keep one container from exhausting the resolver or whalewall: at most 100 queries per
+second (bursts of 200), 32 queries waiting for the upstream and 16 open TCP connections per container.
+One rule can allow at most 4096 addresses at a time; a query that would exceed that fails. Queries over the limit are dropped, connections from addresses that aren't managed containers are closed
+at once, and log lines caused by a single container are sampled. A rules label larger than 1 MiB, with
+more than 1000 rules or 20000 addresses, domains and ports is invalid. Only the first YAML document of a
+label is used, whalewall logs a warning if there is another one.
+
+Invalid rules: by default a container with invalid rules gets no rules and is not restricted, and
+whalewall logs an error, as it always did. With `-isolate-invalid` all traffic of the container is dropped
+instead; this is recommended, since a typo in a label otherwise leaves the container open. A `container`
+rule that names a container which does not have `whalewall.enabled` set always isolates the container.
+
+Known limitations: another container on the same bridge can be reached if an allowed name resolves to
+its address; networks connected to a container after it started are not managed; a container that uses
+the network of another container (`network_mode: container:...` or `service:...`) has no address of its
+own, so it is filtered by the rules of the container whose network it uses, and its own rules are not
+applied (whalewall logs an error for it).
+
+Capabilities: whalewall cannot stop a container from changing the addresses it sends from. A container
+that keeps `NET_RAW` (a Docker default) can forge the source address of another container on its
+network, so it can use that container's rules; a container with `NET_ADMIN`, `SYS_ADMIN` or
+`privileged` can change its own network configuration. Drop `NET_RAW` for managed containers
+(`cap_drop: [NET_RAW]` in compose) and don't grant the others; whalewall logs a message for each
+container that keeps one of these capabilities.
+
+### IPv6
+
+With the `-ipv6` flag whalewall manages IPv6 traffic of containers that have an IPv6 address, in addition
+to IPv4. Without it IPv6 traffic is not touched, as before (a warning is logged for containers that
+have an IPv6 address). This needs
+Docker's IPv6 firewalling to be enabled (`"ipv6": true` and `"ip6tables": true` in `daemon.json`,
+Docker 28 or newer) so that Docker creates the `DOCKER-USER` chain for IPv6. If a managed container
+has an IPv6 address and whalewall can't manage IPv6, whalewall logs an error and creates no rules
+for the container. Rules apply to both families: `ips` entries are used in the family they belong to,
+and everything else (ports, domains, containers) applies to both. ICMPv6 neighbor discovery (router
+solicitation, neighbor solicitation and advertisement) and packet too big messages are always allowed for
+managed containers since IPv6 can't work without them. Router advertisements and redirects are not: a
+container could use them to take over the IPv6 routes of the other containers on its network.
+`mapped_ports` rules are only supported for IPv4.
+
+### Compatibility
+
+Everything new is off unless it is asked for, so updating whalewall does not change what it does for an
+existing setup. The rules created for containers without the new features are the same as the ones older
+versions created, whalewall takes over rules created by an older version when it starts, and the state
+database is unchanged.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `-dns` | off | Enables `domains` in rules and the DNS resolver (see "Domain rules"). |
+| `-ipv6` | off | Manages the IPv6 traffic of containers with an IPv6 address. |
+| `-isolate-invalid` | off | Drops all traffic of a container whose rules are invalid, instead of leaving it without rules. |
+
+Always on, and only informational: warnings about missing `br_netfilter`, enabled connection tracking
+helpers, and about containers that keep `NET_RAW`, `NET_ADMIN` or `SYS_ADMIN`, or are privileged. A
+container that uses the network of another container is no longer silently skipped, an error is logged.
+Rules labels larger than 1 MiB, with more than 1000 rules or 20000 addresses, domains and ports are invalid.
 
 ### Docker environmental variables
 

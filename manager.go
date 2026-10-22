@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -57,8 +58,32 @@ type RuleManager struct {
 	createCh chan containerDetails
 	deleteCh chan string
 
+	// ipv6Enabled is set by WithIPv6, isolateInvalid by
+	// WithIsolateInvalidRules
+	ipv6Enabled    bool
+	isolateInvalid bool
+
+	// ipv6Ready is true when the base rules for IPv6 exist
+	ipv6Mtx   sync.Mutex
+	ipv6Ready bool
+
 	db        database.DB
 	dockerCli dockerClient
+
+	// dnsEnabled is set by WithDNS. dns is the resolver, created by
+	// initDNS when whalewall starts; dnsPolicies holds the policy of every
+	// container with domain rules by container ID, guarded by dnsMtx.
+	dnsEnabled  bool
+	dnsOpts     DNSOptions
+	dns         dnsServer
+	dnsMtx      sync.Mutex
+	dnsPolicies map[string]*domainPolicy
+	// local tells which addresses belong to the host, domain rules never
+	// allow those
+	local *localAddrs
+	// interfaceAddrs lists the addresses of the host's interfaces; a field
+	// so tests can replace it
+	interfaceAddrs func() ([]net.Addr, error)
 }
 
 type dockerClientCreator func() (dockerClient, error)
@@ -70,7 +95,9 @@ type containerDetails struct {
 	isNew     bool
 }
 
-func NewRuleManager(ctx context.Context, logger *zap.Logger, dbFile string, timeout time.Duration) (*RuleManager, error) {
+// NewRuleManager creates a RuleManager. Without opts it behaves like it
+// did before options existed; each option turns on one new feature.
+func NewRuleManager(ctx context.Context, logger *zap.Logger, dbFile string, timeout time.Duration, opts ...Option) (*RuleManager, error) {
 	r := RuleManager{
 		stopping: make(chan struct{}),
 		done:     make(chan struct{}),
@@ -88,9 +115,13 @@ func NewRuleManager(ctx context.Context, logger *zap.Logger, dbFile string, time
 		newFirewallClient: func() (firewallClient, error) {
 			return nftables.New()
 		},
+		interfaceAddrs:   net.InterfaceAddrs,
 		containerTracker: container.NewTracker(logger),
 		createCh:         make(chan containerDetails),
 		deleteCh:         make(chan string),
+	}
+	for _, opt := range opts {
+		opt(&r)
 	}
 	err := r.initDB(ctx, dbFile)
 	if err != nil {
@@ -104,8 +135,20 @@ func (r *RuleManager) Start(ctx context.Context) error {
 	if err := r.init(ctx); err != nil {
 		return err
 	}
-	if err := r.createBaseRules(); err != nil {
+	// the resolver is created before any container is handled, as
+	// containers that exist already are processed right after this
+	if r.dnsEnabled {
+		if err := r.initDNS(); err != nil {
+			return err
+		}
+	}
+	if err := r.createFamilyBaseRules(family4); err != nil {
 		return fmt.Errorf("error creating base rules: %w", err)
+	}
+	if r.ipv6Enabled {
+		if err := r.ensureIPv6BaseRules(); err != nil {
+			r.logger.Info("not managing IPv6 traffic", zap.Error(err))
+		}
 	}
 
 	if err := r.cleanupRules(ctx); err != nil {
@@ -293,10 +336,34 @@ func (r *RuleManager) Stop() {
 	close(r.stopping)
 	r.wg.Wait()
 
+	// stop the resolver after the workers, which may still be registering
+	// containers with it
+	if r.dns != nil {
+		r.dns.Close()
+	}
+
 	if err := r.dockerCli.Close(); err != nil {
 		r.logger.Error("error closing docker client", zap.Error(err))
 	}
 	if err := r.db.Close(); err != nil {
 		r.logger.Error("error closing database: %w", zap.Error(err))
 	}
+}
+
+// ensureIPv6BaseRules creates the base rules for IPv6 if they don't
+// exist yet. IPv6 is only managed if Docker created the chains whalewall
+// hooks into, which requires Docker's ip6tables support.
+func (r *RuleManager) ensureIPv6BaseRules() error {
+	r.ipv6Mtx.Lock()
+	defer r.ipv6Mtx.Unlock()
+
+	if r.ipv6Ready {
+		return nil
+	}
+	if err := r.createFamilyBaseRules(family6); err != nil {
+		return err
+	}
+	r.ipv6Ready = true
+
+	return nil
 }

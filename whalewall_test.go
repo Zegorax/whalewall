@@ -354,6 +354,12 @@ func chainExists(name string, chains []*nftables.Chain) bool {
 	})
 }
 
+const (
+	netCont    = "cont_net"
+	anyHostIP  = "0.0.0.0"
+	port443UDP = "443/udp"
+)
+
 var (
 	cont1ID     = "container_one_ID"
 	cont2ID     = "container_two_ID"
@@ -387,12 +393,12 @@ func TestRuleCreation(t *testing.T) {
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 						},
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -425,7 +431,7 @@ func TestRuleCreation(t *testing.T) {
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - proto: tcp
@@ -435,7 +441,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -494,7 +500,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - proto: tcp
@@ -505,7 +511,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -574,7 +580,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - proto: tcp
@@ -585,7 +591,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -652,7 +658,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - ips:
@@ -664,7 +670,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -725,7 +731,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - ips:
@@ -737,7 +743,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -798,7 +804,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - ips:
@@ -811,7 +817,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -882,7 +888,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - ips:
@@ -895,7 +901,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -964,7 +970,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - proto: udp
@@ -976,7 +982,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -1043,7 +1049,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - log_prefix: "logger pfx"
@@ -1054,7 +1060,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -1127,7 +1133,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - proto: tcp
@@ -1139,7 +1145,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -1213,7 +1219,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - proto: tcp
@@ -1227,7 +1233,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -1305,7 +1311,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - proto: tcp
@@ -1319,7 +1325,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -1382,7 +1388,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - container: container2
@@ -1394,7 +1400,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"cont_net": {
+							netCont: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -1408,12 +1414,12 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 						},
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"cont_net": {
+							netCont: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont2Addr.String(),
 							},
@@ -1486,7 +1492,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - container: container2
@@ -1500,7 +1506,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"cont_net": {
+							netCont: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -1514,12 +1520,12 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 						},
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"cont_net": {
+							netCont: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont2Addr.String(),
 							},
@@ -1594,7 +1600,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - container: container2
@@ -1606,7 +1612,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"cont_net": {
+							netCont: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -1620,7 +1626,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 output:
   - container: container1
@@ -1632,7 +1638,7 @@ output:
 					},
 					NetworkSettings: &types.NetworkSettings{
 						Networks: map[string]*network.EndpointSettings{
-							"cont_net": {
+							netCont: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont2Addr.String(),
 							},
@@ -1733,7 +1739,7 @@ output:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 mapped_ports:
   external:
@@ -1745,7 +1751,7 @@ mapped_ports:
 							Ports: nat.PortMap{
 								"80/tcp": []nat.PortBinding{
 									{
-										HostIP:   "0.0.0.0",
+										HostIP:   anyHostIP,
 										HostPort: "80",
 									},
 									{
@@ -1755,7 +1761,7 @@ mapped_ports:
 								},
 								"53/udp": []nat.PortBinding{
 									{
-										HostIP:   "0.0.0.0",
+										HostIP:   anyHostIP,
 										HostPort: "5533",
 									},
 									{
@@ -1766,7 +1772,7 @@ mapped_ports:
 							},
 						},
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -1910,7 +1916,7 @@ mapped_ports:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 mapped_ports:
   external:
@@ -1924,7 +1930,7 @@ mapped_ports:
 							Ports: nat.PortMap{
 								"80/tcp": []nat.PortBinding{
 									{
-										HostIP:   "0.0.0.0",
+										HostIP:   anyHostIP,
 										HostPort: "8080",
 									},
 									{
@@ -1934,7 +1940,7 @@ mapped_ports:
 								},
 								"53/udp": []nat.PortBinding{
 									{
-										HostIP:   "0.0.0.0",
+										HostIP:   anyHostIP,
 										HostPort: "5533",
 									},
 									{
@@ -1945,7 +1951,7 @@ mapped_ports:
 							},
 						},
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -2062,7 +2068,7 @@ mapped_ports:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 mapped_ports:
   localhost:
@@ -2072,16 +2078,16 @@ mapped_ports:
 					NetworkSettings: &types.NetworkSettings{
 						NetworkSettingsBase: types.NetworkSettingsBase{
 							Ports: nat.PortMap{
-								"443/udp": []nat.PortBinding{
+								port443UDP: []nat.PortBinding{
 									{
-										HostIP:   "0.0.0.0",
+										HostIP:   anyHostIP,
 										HostPort: "8443",
 									},
 								},
 							},
 						},
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -2142,7 +2148,7 @@ mapped_ports:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 mapped_ports:
   localhost:
@@ -2154,16 +2160,16 @@ mapped_ports:
 					NetworkSettings: &types.NetworkSettings{
 						NetworkSettingsBase: types.NetworkSettingsBase{
 							Ports: nat.PortMap{
-								"443/udp": []nat.PortBinding{
+								port443UDP: []nat.PortBinding{
 									{
-										HostIP:   "0.0.0.0",
+										HostIP:   anyHostIP,
 										HostPort: "8443",
 									},
 								},
 							},
 						},
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -2240,7 +2246,7 @@ mapped_ports:
 					},
 					Config: &container.Config{
 						Labels: map[string]string{
-							enabledLabel: "true",
+							enabledLabel: enabledTrue,
 							rulesLabel: `
 mapped_ports:
   localhost:
@@ -2254,16 +2260,16 @@ mapped_ports:
 					NetworkSettings: &types.NetworkSettings{
 						NetworkSettingsBase: types.NetworkSettingsBase{
 							Ports: nat.PortMap{
-								"443/udp": []nat.PortBinding{
+								port443UDP: []nat.PortBinding{
 									{
-										HostIP:   "0.0.0.0",
+										HostIP:   anyHostIP,
 										HostPort: "8443",
 									},
 								},
 							},
 						},
 						Networks: map[string]*network.EndpointSettings{
-							"default": {
+							netDefault: {
 								Gateway:   gatewayAddr.String(),
 								IPAddress: cont1Addr.String(),
 							},
@@ -2451,8 +2457,6 @@ mapped_ports:
 	}
 
 	for _, tt := range tests {
-		tt := tt
-
 		for chain, rules := range tt.expectedRules {
 			for i := range rules {
 				// set rule's table here so we don't have to in test
@@ -2507,7 +2511,7 @@ func TestDeletingContainers(t *testing.T) {
 			},
 			Config: &container.Config{
 				Labels: map[string]string{
-					enabledLabel: "true",
+					enabledLabel: enabledTrue,
 					rulesLabel: `
 output:
 - container: container2
@@ -2522,7 +2526,7 @@ output:
 			},
 			NetworkSettings: &types.NetworkSettings{
 				Networks: map[string]*network.EndpointSettings{
-					"cont_net": {
+					netCont: {
 						Gateway:   gatewayAddr.String(),
 						IPAddress: cont1Addr.String(),
 					},
@@ -2536,12 +2540,12 @@ output:
 			},
 			Config: &container.Config{
 				Labels: map[string]string{
-					enabledLabel: "true",
+					enabledLabel: enabledTrue,
 				},
 			},
 			NetworkSettings: &types.NetworkSettings{
 				Networks: map[string]*network.EndpointSettings{
-					"cont_net": {
+					netCont: {
 						Gateway:   gatewayAddr.String(),
 						IPAddress: cont2Addr.String(),
 					},
@@ -2652,12 +2656,12 @@ func TestCreationIdempotency(t *testing.T) {
 			},
 			Config: &container.Config{
 				Labels: map[string]string{
-					enabledLabel: "true",
+					enabledLabel: enabledTrue,
 				},
 			},
 			NetworkSettings: &types.NetworkSettings{
 				Networks: map[string]*network.EndpointSettings{
-					"cont_net": {
+					netCont: {
 						Gateway:   gatewayAddr.String(),
 						IPAddress: cont2Addr.String(),
 					},
@@ -2671,7 +2675,7 @@ func TestCreationIdempotency(t *testing.T) {
 			},
 			Config: &container.Config{
 				Labels: map[string]string{
-					enabledLabel: "true",
+					enabledLabel: enabledTrue,
 					rulesLabel: `
 output:
   - container: container2
@@ -2683,7 +2687,7 @@ output:
 			},
 			NetworkSettings: &types.NetworkSettings{
 				Networks: map[string]*network.EndpointSettings{
-					"cont_net": {
+					netCont: {
 						Gateway:   gatewayAddr.String(),
 						IPAddress: cont1Addr.String(),
 					},
@@ -2814,7 +2818,7 @@ func TestCancelingCreation(t *testing.T) {
 		},
 		Config: &container.Config{
 			Labels: map[string]string{
-				enabledLabel: "true",
+				enabledLabel: enabledTrue,
 				rulesLabel: `
 output:
 - proto: tcp
@@ -2825,7 +2829,7 @@ output:
 		},
 		NetworkSettings: &types.NetworkSettings{
 			Networks: map[string]*network.EndpointSettings{
-				"cont_net": {
+				netCont: {
 					Gateway:   gatewayAddr.String(),
 					IPAddress: cont1Addr.String(),
 				},
