@@ -29,7 +29,7 @@ var allowedSyscalls = seccomp.SyscallRules{
 			seccomp.MatchAny{},
 			seccomp.EqualTo(12),
 		},
-		// DNS resolver, IPv4 and IPv6 addresses
+		// DNS resolver, sockaddr_in (16 bytes) and sockaddr_in6 (28 bytes)
 		{
 			seccomp.MatchAny{},
 			seccomp.MatchAny{},
@@ -140,6 +140,7 @@ var allowedSyscalls = seccomp.SyscallRules{
 			seccomp.EqualTo(0),
 		},
 	},
+	// random DNS message IDs for queries to the upstream resolvers
 	unix.SYS_GETRANDOM:   {},
 	unix.SYS_GETCWD:      {},
 	unix.SYS_GETEUID:     {},
@@ -162,7 +163,8 @@ var allowedSyscalls = seccomp.SyscallRules{
 			seccomp.MatchAny{},
 		},
 	},
-	unix.SYS_GETTID:  {},
+	unix.SYS_GETTID: {},
+	// listening for DNS queries over TCP
 	unix.SYS_LISTEN:  {},
 	unix.SYS_LSEEK:   {},
 	unix.SYS_LSTAT:   {},
@@ -226,8 +228,9 @@ var allowedSyscalls = seccomp.SyscallRules{
 	unix.SYS_RT_SIGPROCMASK:  {},
 	unix.SYS_RT_SIGRETURN:    {},
 	unix.SYS_SCHED_YIELD:     {},
-	unix.SYS_RECVFROM:        {},
-	unix.SYS_SENDTO:          {},
+	// receiving DNS queries and sending answers over UDP
+	unix.SYS_RECVFROM: {},
+	unix.SYS_SENDTO:   {},
 	unix.SYS_SENDMSG: {
 		{
 			seccomp.MatchAny{},
@@ -236,7 +239,9 @@ var allowedSyscalls = seccomp.SyscallRules{
 		},
 	},
 	unix.SYS_SETSOCKOPT: {
-		// DNS resolver sockets
+		// DNS resolver sockets: reuse the address after a restart, and
+		// receive the destination address of UDP queries so the answer
+		// leaves from the address the query was sent to
 		{
 			seccomp.MatchAny{},
 			seccomp.EqualTo(unix.SOL_SOCKET),

@@ -24,18 +24,23 @@ const (
 )
 
 const (
+	// the defaults of the Config fields with the same names
 	defaultMinTTL  = 30 * time.Second
 	defaultGrace   = 5 * time.Second
 	defaultTimeout = 3 * time.Second
-	startTimeout   = 3 * time.Second
-	maxCNAMEChain  = 16
 	defaultMaxTTL  = time.Hour
+	// startTimeout is how long Acquire waits for a listener to come up
+	startTimeout = 3 * time.Second
+	// maxCNAMEChain is how many CNAME hops filterAnswer follows; longer
+	// chains are cut so a looping or huge chain can't cost much time
+	maxCNAMEChain = 16
 	// maxAddrsPerAnswer limits how many addresses a single answer can
 	// open, an upstream controlled by an attacker could return thousands
 	maxAddrsPerAnswer = 64
 )
 
-// Resolved is an address that was returned for an allowed name.
+// Resolved is an address that was returned for an allowed name. The
+// firewall allows it for TTL and then forgets it.
 type Resolved struct {
 	Addr netip.Addr
 	// TTL is the time the firewall should keep the address allowed,
@@ -43,7 +48,9 @@ type Resolved struct {
 	TTL time.Duration
 }
 
-// Policy is the DNS policy of a single container.
+// Policy is the DNS policy of a single container. The server finds the
+// policy of a query by its source address, which is why containers have to
+// use the server directly and not through another resolver.
 type Policy struct {
 	// Name is the container name, used for logging.
 	Name string
@@ -57,8 +64,10 @@ type Policy struct {
 	// allowed name resolves to them, such as the host's addresses on the
 	// container's networks. May be nil.
 	Reject func(addr netip.Addr) bool
-	// Allow is called with the queried name and the addresses of an allowed answer before
-	// the answer is returned. If it returns an error the query fails.
+	// Allow is called with the queried name and the addresses of an
+	// allowed answer before the answer is returned. If it returns an
+	// error the query fails, so the container never gets an address
+	// that the firewall doesn't allow yet.
 	Allow func(ctx context.Context, name string, addrs []Resolved) error
 }
 
@@ -93,24 +102,32 @@ type Server struct {
 	cfg    Config
 	logger *zap.Logger
 
+	// mtx guards policies, which is looked up for every query, and
+	// listeners
 	mtx       sync.RWMutex
 	policies  map[netip.Addr]*Policy
 	listeners map[netip.AddrPort]*listener
 
+	// srcMtx guards sources, the per container state of the limits in
+	// limits.go; unmanagedLog limits the log lines of unknown sources
 	srcMtx       sync.Mutex
 	sources      map[netip.Addr]*sourceState
 	unmanagedLog globalLog
 
+	// tcpTotal is the number of open TCP connections of all sources
 	tcpMtx   sync.Mutex
 	tcpTotal int
 }
 
+// listener is the UDP and TCP servers on one address. It is shared by all
+// containers that use that address (one per gateway), so it is reference
+// counted.
 type listener struct {
 	refs    int
 	servers []*dns.Server
 }
 
-// New creates a Server.
+// New creates a Server. Zero values in cfg are replaced by the defaults.
 func New(logger *zap.Logger, cfg Config) (*Server, error) {
 	if len(cfg.Upstreams) == 0 {
 		return nil, errors.New("no upstream DNS servers configured")
@@ -124,6 +141,7 @@ func New(logger *zap.Logger, cfg Config) (*Server, error) {
 	if cfg.MaxTTL == 0 {
 		cfg.MaxTTL = defaultMaxTTL
 	}
+	// a maximum below the minimum would make no sense
 	cfg.MaxTTL = max(cfg.MaxTTL, cfg.MinTTL)
 	if cfg.Timeout == 0 {
 		cfg.Timeout = defaultTimeout
@@ -165,7 +183,8 @@ func SystemUpstreams(resolvConf string) []string {
 	return upstreams
 }
 
-// Register sets the policy for queries originating from addrs.
+// Register sets the policy for queries originating from addrs. Addresses
+// are stored unmapped so an IPv4-mapped IPv6 source finds its IPv4 policy.
 func (s *Server) Register(addrs []netip.Addr, p *Policy) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
@@ -196,6 +215,7 @@ func (s *Server) Unregister(addrs []netip.Addr, p *Policy) {
 	s.forgetSources(removed)
 }
 
+// policy returns the policy of a source address, if it has one.
 func (s *Server) policy(a netip.Addr) (*Policy, bool) {
 	s.mtx.RLock()
 	defer s.mtx.RUnlock()
@@ -232,6 +252,9 @@ func (s *Server) Acquire(addr netip.AddrPort) error {
 	return nil
 }
 
+// startServer starts a DNS server for one network and returns once it is
+// accepting queries. TCP servers get a limitedListener so unknown sources
+// and connection floods are dealt with before any DNS is parsed.
 func (s *Server) startServer(addr netip.AddrPort, network string) (*dns.Server, error) {
 	started := make(chan struct{})
 	srv := &dns.Server{
@@ -251,6 +274,8 @@ func (s *Server) startServer(addr netip.AddrPort, network string) (*dns.Server, 
 	}
 	errCh := make(chan error, 1)
 	go func() {
+		// ListenAndServe ignores srv.Listener, so a server with our own
+		// listener has to be started with ActivateAndServe
 		if srv.Listener != nil {
 			errCh <- srv.ActivateAndServe()
 			return
@@ -306,8 +331,11 @@ func (s *Server) Close() {
 func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	resp := s.handle(w, req)
 	if resp == nil {
+		// the query was dropped on purpose, nothing is sent
 		return
 	}
+	// UDP answers are cut to the size the client said it can take (512
+	// bytes without EDNS0), the client retries over TCP if it is truncated
 	if w.RemoteAddr().Network() == netUDP {
 		size := dns.MinMsgSize
 		if opt := req.IsEdns0(); opt != nil {
@@ -320,6 +348,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	}
 }
 
+// remoteAddr returns the unmapped source address of a query.
 func remoteAddr(w dns.ResponseWriter) (netip.Addr, bool) {
 	switch a := w.RemoteAddr().(type) {
 	case *net.UDPAddr:
@@ -333,6 +362,15 @@ func remoteAddr(w dns.ResponseWriter) (netip.Addr, bool) {
 	return netip.Addr{}, false
 }
 
+// handle answers a query, or returns nil to drop it. In order it:
+//
+//  1. refuses sources without a policy (default deny)
+//  2. applies the rate limits of the source
+//  3. refuses anything but a plain query for one name
+//  4. answers NXDOMAIN for names the policy doesn't allow, without asking
+//     the upstream, so a denied name never leaves the host
+//  5. forwards allowed names, removes unsafe records from the answer and
+//     lets the firewall allow the addresses before returning it
 func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 	src, ok := remoteAddr(w)
 	if !ok {
@@ -399,10 +437,13 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 		}
 		return reply(req, dns.RcodeNameError)
 	}
+	// a container without an IPv6 address can't use AAAA records; an empty
+	// answer makes it fall back to IPv4 at once and not wait for a timeout
 	if q.Qtype == dns.TypeAAAA && !p.HasIPv6 {
 		return reply(req, dns.RcodeSuccess)
 	}
 
+	// room for a UDP exchange and a TCP retry of one upstream
 	ctx, cancel := context.WithTimeout(context.Background(), 2*s.cfg.Timeout+s.cfg.Grace)
 	defer cancel()
 
@@ -411,11 +452,15 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 		logger.Error("error forwarding DNS query", zap.Error(err))
 		return reply(req, dns.RcodeServerFailure)
 	}
+	// forward used its own ID, the container expects the one it sent
 	upstreamResp.Id = req.Id
 	if upstreamResp.Rcode != dns.RcodeSuccess {
+		// NXDOMAIN and the like open nothing, pass them on as they are
 		return upstreamResp
 	}
 
+	// filterAnswer also edits upstreamResp in place, so what is returned
+	// below contains exactly the addresses that are allowed here
 	resolved := s.filterAnswer(upstreamResp, q.Name, p.Reject)
 	if len(resolved) != 0 {
 		if err := p.Allow(ctx, name, resolved); err != nil {
@@ -428,6 +473,7 @@ func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 	return upstreamResp
 }
 
+// reply returns an answer to req that only has a response code.
 func reply(req *dns.Msg, rcode int) *dns.Msg {
 	resp := new(dns.Msg)
 	resp.SetRcode(req, rcode)
@@ -437,7 +483,9 @@ func reply(req *dns.Msg, rcode int) *dns.Msg {
 }
 
 // forward sends req to the upstream resolvers, returning the first
-// usable response.
+// usable response. A query goes out over UDP and is repeated over TCP if the
+// answer was truncated. SERVFAIL and REFUSED mean the upstream can't help,
+// so the next one is tried; NXDOMAIN is a real answer and is returned.
 func (s *Server) forward(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 	var errs []error
 	for _, upstream := range s.cfg.Upstreams {
@@ -463,6 +511,10 @@ func (s *Server) forward(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 	return nil, errors.Join(errs...)
 }
 
+// exchange sends one query to one upstream. The question in the response
+// has to be the one that was asked, so an upstream (or an attacker who can
+// answer in its place) can't use the query of an allowed name to deliver
+// the answer to another one.
 func (s *Server) exchange(ctx context.Context, network, upstream string, req *dns.Msg) (*dns.Msg, error) {
 	c := dns.Client{Net: network, Timeout: s.cfg.Timeout}
 	resp, _, err := c.ExchangeContext(ctx, req, upstream)
@@ -481,7 +533,14 @@ func (s *Server) exchange(ctx context.Context, network, upstream string, req *dn
 // removed from the answer and so are addresses that must never be
 // reachable through DNS (loopback, link-local, ...), preventing a
 // permitted name from pointing a container at the host.
+//
+// The TTL of each address is the record's TTL, raised to MinTTL and cut
+// to MaxTTL, plus Grace, so a huge TTL can't keep an address open for long
+// and a zero TTL doesn't close it before the connection is made. At most
+// maxAddrsPerAnswer addresses are returned.
 func (s *Server) filterAnswer(resp *dns.Msg, qname string, reject func(netip.Addr) bool) []Resolved {
+	// owners are the names that belong to this answer: the queried name
+	// and every CNAME target reachable from it
 	owners := map[string]bool{strings.ToLower(qname): true}
 	// follow CNAMEs; the answer is usually ordered but don't rely on it
 	for range maxCNAMEChain {
@@ -518,6 +577,7 @@ func (s *Server) filterAnswer(resp *dns.Msg, qname string, reject func(netip.Add
 		case *dns.AAAA:
 			ip = rr.AAAA
 		default:
+			// CNAMEs and other records carry no address, keep them
 			answer = append(answer, rr)
 			continue
 		}
@@ -525,6 +585,7 @@ func (s *Server) filterAnswer(resp *dns.Msg, qname string, reject func(netip.Add
 		if !ok {
 			continue
 		}
+		// ::ffff:127.0.0.1 is loopback too
 		addr = addr.Unmap()
 		if addr.IsLoopback() || addr.IsUnspecified() || addr.IsMulticast() || addr.IsLinkLocalUnicast() || (reject != nil && reject(addr)) {
 			s.logger.Warn("dropping unsafe address from DNS answer", zap.Stringer("addr", addr), zap.String("dns.name", qname))
@@ -547,7 +608,8 @@ func (s *Server) filterAnswer(resp *dns.Msg, qname string, reject func(netip.Add
 	return resolved
 }
 
-// filterExtra keeps only the OPT pseudo-record.
+// filterExtra keeps only the OPT pseudo-record (EDNS0), so the additional
+// section can't smuggle in glue records with addresses nobody checked.
 func filterExtra(extra []dns.RR) []dns.RR {
 	kept := extra[:0]
 	for _, rr := range extra {

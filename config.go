@@ -40,6 +40,8 @@ type ruleConfig struct {
 	LogPrefix string `yaml:"log_prefix"`
 	Network   string
 	IPs       []addrOrRange
+	// Domains are the names the rule allows traffic to, instead of IPs,
+	// see domainPattern. Needs the -dns flag.
 	Domains   domainsList
 	Container string
 	Proto     protocol
@@ -329,10 +331,14 @@ const (
 	maxEntries        = 20000
 )
 
+// validateConfig checks the limits on the size of a container's rules and
+// validates each rule.
 func validateConfig(c config) error {
 	if len(c.Output) > maxRules {
 		return fmt.Errorf("more than %d output rules", maxRules)
 	}
+	// entries counts everything that becomes a set element or a comparison
+	// in the kernel
 	entries := 0
 	for _, r := range c.Output {
 		entries += len(r.IPs) + len(r.Domains) + len(r.SrcPorts) + len(r.DstPorts)
@@ -358,6 +364,10 @@ func validateRule(r ruleConfig) error {
 		return errors.New(`"ip" and "container" are mutually exclusive`)
 	}
 
+	// A rule with domains takes its destinations from the resolver, so
+	// anything else that names a destination is a conflict. Ports and
+	// protocol are required: allowing every port of a name's addresses
+	// would be wider than most rules mean to be.
 	if len(r.Domains) != 0 {
 		if len(r.IPs) != 0 {
 			return errors.New(`"domains" and "ips" are mutually exclusive`)
