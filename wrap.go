@@ -31,6 +31,8 @@ func (w *wrappedDockerClient) ContainerInspect(ctx context.Context, containerID 
 	})
 }
 
+// NetworkList lists Docker's networks, with the same timeout as the other
+// calls. It is used to find the gateways of the bridge networks.
 func (w *wrappedDockerClient) NetworkList(ctx context.Context, options types.NetworkListOptions) ([]types.NetworkResource, error) {
 	return withTimeout(ctx, w.timeout, func(ctx context.Context) ([]types.NetworkResource, error) {
 		return w.dockerClient.NetworkList(ctx, options)

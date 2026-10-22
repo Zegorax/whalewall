@@ -12,6 +12,8 @@ import (
 	"go.uber.org/zap"
 )
 
+// localAddrTTL is how long the list of local addresses is used before it is
+// loaded again; networks and addresses change when containers come and go
 const localAddrTTL = 10 * time.Second
 
 // localAddrs answers whether an address belongs to the host or to a
@@ -21,7 +23,9 @@ const localAddrTTL = 10 * time.Second
 // checked against the destination's own rules.
 type localAddrs struct {
 	logger *zap.Logger
-	load   func(ctx context.Context) ([]netip.Addr, []netip.Prefix, error)
+	// load lists the addresses to reject and, if wanted, the whole prefixes
+	// to reject. It is a field so tests can replace it.
+	load func(ctx context.Context) ([]netip.Addr, []netip.Prefix, error)
 
 	mtx      sync.Mutex
 	expires  time.Time
@@ -29,6 +33,10 @@ type localAddrs struct {
 	prefixes []netip.Prefix
 }
 
+// contains reports whether a is a local address. The lists are loaded
+// lazily and reused for localAddrTTL, because it is called for every
+// address in every DNS answer. If loading fails the previous lists are
+// kept, so a failing Docker API call doesn't open the firewall.
 func (l *localAddrs) contains(a netip.Addr) bool {
 	if l == nil {
 		return false
@@ -57,6 +65,8 @@ func (l *localAddrs) contains(a netip.Addr) bool {
 		}
 	}
 
+	// IPv4-mapped IPv6 addresses (::ffff:10.0.0.1) are the same host as
+	// their IPv4 form
 	a = a.Unmap()
 	if _, ok := l.addrs[a]; ok {
 		return true
@@ -71,7 +81,11 @@ func (l *localAddrs) contains(a netip.Addr) bool {
 }
 
 // loadLocalAddrs lists the host's addresses and the gateways of Docker's
-// bridge networks.
+// bridge networks. The gateway of a bridge network is the host as seen
+// from the containers, so a name that resolves to it would give a container
+// access to the host's own services. The prefixes are always empty: rejecting
+// the subnets of bridge networks would also reject the other containers
+// of the network, which rules legitimately target.
 func (r *RuleManager) loadLocalAddrs(ctx context.Context) ([]netip.Addr, []netip.Prefix, error) {
 	ifAddrs, err := r.interfaceAddrs()
 	if err != nil {

@@ -56,7 +56,8 @@ func (r *RuleManager) clearRules(ctx context.Context) error {
 	return r.clearNAT()
 }
 
-// clearFamily removes the base rules created for a family.
+// clearFamily removes the base rules created for a family: the jump rules
+// to the whalewall chain, the chain itself and the container address set.
 func (r *RuleManager) clearFamily(nfc firewallClient, fam *family) error {
 	// delete jump rules to whalewall chain
 	for _, chainName := range []string{dockerChainName, inputChainName, outputChainName} {
@@ -191,7 +192,8 @@ func (r *RuleManager) deleteContainerRules(ctx context.Context, id, name string)
 	defer tx.Rollback()
 
 	// stop the resolver from answering for this container before the
-	// container's addresses can be reused
+	// container's addresses can be reused; a new container with the same
+	// address would otherwise be answered with this one's policy
 	if r.dns != nil {
 		r.unregisterDNS(id)
 	}
@@ -209,6 +211,8 @@ func (r *RuleManager) deleteContainerRules(ctx context.Context, id, name string)
 		return fmt.Errorf("error getting established containers: %w", err)
 	}
 
+	// everything below is done for each IP family: the container has a
+	// chain, jump targets and rules in other containers' chains in each
 	for _, fam := range families {
 		// delete rules from whalewall chain
 		rules, err := nfc.GetRules(fam.table, fam.whalewallChain)
@@ -218,6 +222,8 @@ func (r *RuleManager) deleteContainerRules(ctx context.Context, id, name string)
 		deleteRulesFromContainer(logger, nfc, rules, id)
 
 		for _, addr := range addrs {
+			// the container's addresses of all families are stored
+			// together, tell them apart by their length
 			if uint32(len(addr)) != fam.addrLen {
 				continue
 			}
@@ -258,6 +264,8 @@ func (r *RuleManager) deleteContainerRules(ctx context.Context, id, name string)
 		}
 	}
 
+	// the sets of domain rules can only go after the chain whose rules
+	// refer to them
 	r.deleteDomainSets(nfc, logger, id)
 
 	logger.Debug("deleting from database")

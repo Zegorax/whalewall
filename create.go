@@ -57,8 +57,10 @@ var (
 	}
 )
 
-// errInvalidRules marks errors caused by the rules a user wrote, which
-// result in the container being isolated.
+// errInvalidRules marks errors caused by the rules a user wrote (as opposed
+// to errors of whalewall or the system), which result in the container being
+// isolated when -isolate-invalid is set. Without the flag the error is
+// returned as before and the container is left without rules.
 var errInvalidRules = errors.New("invalid rules")
 
 // createRules adds nftables rules for started containers.
@@ -75,11 +77,16 @@ func (r *RuleManager) createRules(ctx context.Context) {
 }
 
 // famState holds the per-family state while rules for a container are
-// being created.
+// being created. A container has one chain per IP family it has an address
+// in, in that family's table, and its rules are created once for each.
 type famState struct {
-	fam       *family
-	addrs     map[string][]byte
-	chain     *nftables.Chain
+	fam *family
+	// addrs are the container's addresses of this family by network name
+	addrs map[string][]byte
+	// chain is the container's chain in this family's table
+	chain *nftables.Chain
+	// addrElems are the elements added to the family's container address
+	// set, kept to remove them again if rule creation is canceled
 	addrElems []nftables.SetElement
 	// createdRules are the rules generated from the container's config
 	createdRules []*nftables.Rule
@@ -89,7 +96,8 @@ type famState struct {
 }
 
 // containerAddrs returns the IPv4 addresses of a container by network
-// name.
+// name. A network without a parsable address is an error, as it was before
+// the family abstraction was added: such a container can't be filtered.
 func containerAddrs(networks map[string]*network.EndpointSettings, contName string) (map[string][]byte, error) {
 	addrs := make(map[string][]byte, len(networks))
 	for netName, netSettings := range networks {
@@ -103,12 +111,17 @@ func containerAddrs(networks map[string]*network.EndpointSettings, contName stri
 	return addrs, nil
 }
 
-// parseRules parses and validates the rules of a container.
+// parseRules parses and validates the rules of a container's label. Besides
+// the YAML schema and the checks of validateConfig it makes sure that rules
+// with domains can work: whalewall needs the -dns flag, and the container
+// needs the Docker "dns" option so its queries come from its own address.
 func (r *RuleManager) parseRules(cfg string, container types.ContainerJSON, rulesCfg *config) error {
 	if len(cfg) > maxRulesLabelSize {
 		return fmt.Errorf("rules are larger than %d bytes", maxRulesLabelSize)
 	}
 	dec := yaml.NewDecoder(strings.NewReader(cfg))
+	// unknown keys are errors, so a misspelled "domains" is not silently
+	// ignored (which would leave a rule that allows everything)
 	dec.KnownFields(true)
 	if err := dec.Decode(rulesCfg); err != nil {
 		return fmt.Errorf("error parsing rules: %w", err)
@@ -152,6 +165,10 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 	if container.NetworkSettings == nil {
 		return fmt.Errorf("container %q has no network settings", contName)
 	}
+	// A container that uses another container's network namespace
+	// (network_mode: container:...) has no networks, and so no address, of
+	// its own. Its traffic is the other container's traffic and is filtered
+	// by that container's rules.
 	if len(container.NetworkSettings.Networks) == 0 {
 		mode := ""
 		if container.HostConfig != nil {
@@ -165,6 +182,9 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 		}
 	}
 
+	// capabilities that let a container get around its own rules can't be
+	// prevented by the firewall, so the administrator is told; only the ones
+	// that give full control of the network are warnings
 	for _, w := range capabilityWarnings(container.HostConfig) {
 		if w.severe {
 			logger.Warn(w.msg)
@@ -196,11 +216,15 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 	if err != nil {
 		return err
 	}
-	// allNets has an entry for every network of the container
+	// allNets has an entry for every network of the container, whatever
+	// the family of its address. A rule that names a network is valid if
+	// the container is on it; a family without an address on it just
+	// creates nothing for the rule.
 	allNets := make(map[string][]byte, len(addrs4))
 	for netName, addr := range addrs4 {
 		allNets[netName] = addr
 	}
+	// rules are created for each family the container has addresses in
 	states := []*famState{{fam: family4, addrs: addrs4}}
 
 	nfc, err := r.newFirewallClient()
@@ -362,10 +386,12 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 			if !errors.Is(err, errInvalidRules) {
 				return fmt.Errorf("error validating rules: %w", err)
 			}
-			// Isolate the container completely like for other invalid
-			// rules instead of leaving its drop chain behind without
-			// the container being known. Anything written for the
-			// rules before the error is discarded.
+			// The rules name a container or network that can't be used, which
+			// can only be found out here. Isolate the container completely
+			// like for other invalid rules instead of leaving its drop chain
+			// behind without the container being known. Anything written for
+			// the rules before the error is discarded: the transaction is
+			// rolled back and a new one only records the container itself.
 			logger.Error("invalid rules, all traffic of the container is dropped", zap.Error(err))
 			_ = tx.Rollback()
 			tx, err = r.db.Begin(ctx, logger)
@@ -378,6 +404,7 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 					return fmt.Errorf("error adding container to database: %w", err)
 				}
 			}
+			// continue as if the container had no rules label
 			clear(estContainers)
 			configExists = false
 			rulesCfg = config{}
@@ -405,7 +432,8 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 			continue
 		}
 
-		// allow the container to reach the resolver if it has domain rules
+		// allow the container to reach the resolver if it has domain rules;
+		// without this its redirected DNS queries would hit the drop rule
 		if r.dnsEnabled && hasDomainRules(rulesCfg) {
 			dnsEPs := dnsEndpoints(st, container.NetworkSettings.Networks)
 			if len(dnsEPs) == 0 {
@@ -441,6 +469,9 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 		}
 	}
 
+	// Start answering the container's DNS queries last, when the sets its
+	// rules look addresses up in exist: the first allowed answer already
+	// finds the set it adds addresses to.
 	if r.dnsEnabled && configExists && hasDomainRules(rulesCfg) {
 		var endpoints []dnsEndpoint
 		for _, st := range states {
@@ -878,6 +909,8 @@ func (r *RuleManager) createOutputRules(ctx context.Context, nfc firewallClient,
 
 		// only use the addresses that belong to this family; if a rule
 		// only has addresses of the other family it doesn't apply here
+		// (rules are created for every family, an "ips" entry only makes
+		// sense in its own)
 		if len(ruleCfg.IPs) != 0 {
 			ruleCfg.IPs = st.fam.filterIPs(ruleCfg.IPs)
 			if len(ruleCfg.IPs) == 0 {
@@ -892,6 +925,9 @@ func (r *RuleManager) createOutputRules(ctx context.Context, nfc firewallClient,
 			contID:  id,
 		}
 
+		// a rule with domains allows traffic to the addresses in a set that
+		// the resolver fills; its other fields (ports, protocol, verdict)
+		// are handled as for other rules
 		if len(ruleCfg.Domains) != 0 {
 			domainRules, err := r.createDomainRules(nfc, logger, st, ruleIdx, rule)
 			if err != nil {
@@ -921,6 +957,8 @@ func (r *RuleManager) createOutputRules(ctx context.Context, nfc firewallClient,
 					continue
 				}
 
+				// the destination is a container: use its addresses of this
+				// family, which populateOutputRules looked up
 				var ips []addrOrRange
 				for _, contAddr := range ruleCfg.contAddrs {
 					if familyOfAddr(contAddr) == st.fam {
@@ -1096,7 +1134,8 @@ type ruleDetails struct {
 	contID    string
 	estContID string
 	// domainSet is the set allowed destination addresses are looked up
-	// in; it is used instead of the IPs of cfg for rules with domains
+	// in; it is used instead of the IPs of cfg for rules with domains.
+	// The resolver adds the addresses to it at runtime, see dns.go.
 	domainSet *nftables.Set
 }
 
@@ -1263,13 +1302,18 @@ func createNFTRule(nfc firewallClient, inbound, inversePortOffsets bool, state u
 		proto = unix.IPPROTO_UDP
 	}
 	exprs := make([]expr.Any, 0, 15)
+	// What the rule matches on the "other side" of the connection:
+	// - domain rules: the addresses in the set the resolver fills
+	// - rules with ips: those addresses
+	// - otherwise nothing, any address
 	switch {
 	case domainSet != nil:
 		if len(addr) != 0 {
 			exprs = append(exprs, matchAddrExprs(addr, addrOffset)...)
 		}
 		// only new connections have to match the set, established
-		// connections were allowed when they were created
+		// connections were allowed when they were created. The rule for the
+		// return traffic (inversePortOffsets) never looks at the set.
 		if state&stateNew != 0 && !inversePortOffsets {
 			exprs = append(exprs, getAddrExprN(cfgAddrOffset, fam.addrLen), matchFromNamedSetExpr(domainSet))
 		}
@@ -1654,7 +1698,9 @@ func comparePortsExprs(ports portInterval) []expr.Any {
 }
 
 // matchFromNamedSetExpr matches against a set that already exists in
-// the kernel.
+// the kernel, by name, whereas matchFromSetExpr uses a set that is created
+// together with the rule. The register holds the address to look up, loaded
+// by getAddrExprN before.
 func matchFromNamedSetExpr(set *nftables.Set) expr.Any {
 	// [ lookup reg 1 set ... 0x0 ]
 	return &expr.Lookup{

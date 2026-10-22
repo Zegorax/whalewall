@@ -42,11 +42,16 @@ var (
 var errNoDockerChain = errors.New("couldn't find required Docker chain, is Docker running?")
 
 // createBaseRules creates the rules and sets all container chains
-// depend on for the given family.
+// depend on for IPv4, which whalewall always manages.
 func (r *RuleManager) createBaseRules() error {
 	return r.createFamilyBaseRules(family4)
 }
 
+// createFamilyBaseRules creates what the container chains of an IP family
+// depend on: the whalewall chain, jump rules to it from Docker's chains, and
+// the set that maps container addresses to their chains. The jump rules
+// are the same for every family and are built from the family's address
+// offsets and length (see family.jumpRule).
 func (r *RuleManager) createFamilyBaseRules(fam *family) error {
 	filterTable, whalewallChain := fam.table, fam.whalewallChain
 	srcJumpRule, dstJumpRule := fam.jumpRule(true), fam.jumpRule(false)
@@ -170,6 +175,8 @@ func (r *RuleManager) createFamilyBaseRules(fam *family) error {
 	return nil
 }
 
+// createJumpRule returns a rule that jumps from srcChain to the chain
+// named dstChainName, in the table of srcChain.
 func createJumpRule(srcChain *nftables.Chain, dstChainName string) *nftables.Rule {
 	return &nftables.Rule{
 		Table: srcChain.Table,

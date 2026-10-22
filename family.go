@@ -11,10 +11,17 @@ import (
 // family. Docker keeps the rules of each IP family in separate tables
 // that share the same name, so every object exists once per family.
 type family struct {
-	table          *nftables.Table
+	// table is Docker's filter table of this family
+	table *nftables.Table
+	// whalewallChain is whalewall's chain in that table; Docker's chains
+	// jump to it
 	whalewallChain *nftables.Chain
-	addrSet        *nftables.Set
+	// addrSet maps the addresses of containers to their chains
+	addrSet *nftables.Set
 
+	// addrKeyType and addrLen describe an address in sets and in packets;
+	// srcOffset and dstOffset are where the source and destination
+	// addresses are in the network header
 	addrKeyType nftables.SetDatatype
 	addrLen     uint32
 	srcOffset   uint32
@@ -22,6 +29,9 @@ type family struct {
 }
 
 var (
+	// family4 is built from the existing IPv4 variables in base.go, so the
+	// objects (and the rules created for them) are the same as before the
+	// family abstraction existed
 	family4 = &family{
 		table:          filterTable,
 		whalewallChain: whalewallChain,
@@ -32,17 +42,23 @@ var (
 		dstOffset:      dstAddrOffset,
 	}
 
+	// families are the IP families whalewall manages; code that has to act
+	// on all of them loops over this
 	families = []*family{family4}
 
+	// srcJumpRule and dstJumpRule jump to a container's chain when a packet
+	// comes from or goes to one of the addresses in the address set
 	srcJumpRule = family4.jumpRule(true)
 	dstJumpRule = family4.jumpRule(false)
 )
 
+// String returns the name of the family for logs and error messages.
 func (f *family) String() string {
 	return "ipv4"
 }
 
-// familyOfTable returns the family a table belongs to.
+// familyOfTable returns the family a table belongs to. Only IPv4 is managed
+// for now, so it is always family4.
 func familyOfTable(*nftables.Table) *family {
 	return family4
 }
@@ -56,7 +72,9 @@ func familyOfAddr(a netip.Addr) *family {
 	return nil
 }
 
-// addrBytes returns the address in the form it has in a packet header.
+// addrBytes returns the address in the form it has in a packet header:
+// 4 bytes for IPv4. An IPv4-mapped IPv6 address (::ffff:a.b.c.d) is
+// converted to its IPv4 form first, as that is what such a packet carries.
 func addrBytes(a netip.Addr) []byte {
 	if a.Is4In6() {
 		a = a.Unmap()
@@ -64,7 +82,9 @@ func addrBytes(a netip.Addr) []byte {
 	return a.AsSlice()
 }
 
-// filterIPs returns the entries of ips that belong to f.
+// filterIPs returns the entries of ips that belong to f. A range belongs to
+// the family of its first address. Entries of a family that isn't managed
+// are dropped, so a rule that only has those matches nothing.
 func (f *family) filterIPs(ips []addrOrRange) []addrOrRange {
 	var out []addrOrRange
 	for _, ip := range ips {

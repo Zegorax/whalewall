@@ -88,6 +88,8 @@ func mainRetCode() int {
 		}
 	}
 
+	// warn about host settings that make the rules ineffective; this has to
+	// happen before privileges are dropped as it reads from /proc/sys
 	checkKernelSettings(logger)
 
 	// create rule manager and drop unneeded privileges
@@ -101,11 +103,14 @@ func mainRetCode() int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// every flag that adds behavior is off by default and becomes an
+	// option; without any whalewall behaves like previous versions
 	var opts []whalewall.Option
 	if *isolateInvalid {
 		opts = append(opts, whalewall.WithIsolateInvalidRules())
 	}
 	if *dnsEnabled {
+		// flag.Uint is wider than a port
 		if *dnsPort == 0 || *dnsPort > 65535 {
 			logger.Error("invalid DNS port", zap.Uint("dns.port", *dnsPort))
 			return 1
@@ -116,6 +121,7 @@ func mainRetCode() int {
 			MaxTTL: *dnsMaxTTL,
 			Grace:  *dnsGrace,
 		}
+		// without upstreams the resolver uses the host's /etc/resolv.conf
 		if *dnsUpstream != "" {
 			for _, up := range strings.Split(*dnsUpstream, ",") {
 				dnsOpts.Upstreams = append(dnsOpts.Upstreams, strings.TrimSpace(up))

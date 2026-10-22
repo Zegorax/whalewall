@@ -10,6 +10,10 @@ import (
 	"golang.org/x/net/idna"
 )
 
+// domainKind is how a domainPattern matches names below its suffix. Rules
+// list patterns in the "domains" key, for example:
+//
+//	domains: [example.com, "*.example.com", "**.cdn.example.com"]
 type domainKind uint8
 
 const (
@@ -21,6 +25,8 @@ const (
 	domainNested
 )
 
+// the limits of DNS names: 253 characters in total (without the trailing
+// dot), 63 per label
 const (
 	maxDomainLen = 253
 	maxLabelLen  = 63
@@ -41,6 +47,7 @@ func parseDomainPattern(s string) (domainPattern, error) {
 	var p domainPattern
 
 	s = strings.TrimSuffix(strings.TrimSpace(s), ".")
+	// "**." has to be checked before "*." as it starts with it
 	switch {
 	case strings.HasPrefix(s, "**."):
 		p.kind = domainNested
@@ -52,6 +59,8 @@ func parseDomainPattern(s string) (domainPattern, error) {
 	if s == "" {
 		return domainPattern{}, errors.New("domain is empty")
 	}
+	// a wildcard anywhere else ("a*.example.com", "foo.*.com") would need
+	// partial label matching, which is deliberately not supported
 	if strings.Contains(s, "*") {
 		return domainPattern{}, fmt.Errorf(`invalid domain %q: "*" and "**" are only allowed as the entire first label`, s)
 	}
@@ -66,7 +75,10 @@ func parseDomainPattern(s string) (domainPattern, error) {
 }
 
 // normalizeDomain validates a name and returns its lower-case ASCII form
-// without a trailing dot.
+// without a trailing dot. Every name that is compared to a pattern goes
+// through the same form, so unicode names, upper case and trailing dots can't
+// make a name match, or not match, differently than the administrator
+// meant.
 func normalizeDomain(s string) (string, error) {
 	s = strings.TrimSuffix(s, ".")
 	if s == "" {
@@ -78,6 +90,8 @@ func normalizeDomain(s string) (string, error) {
 	if !utf8.ValidString(s) {
 		return "", fmt.Errorf("invalid domain %q: not valid UTF-8", s)
 	}
+	// internationalized names become punycode ("bücher.de" is
+	// "xn--bcher-kva.de"), which is what appears in DNS queries
 	name, err := idna.Lookup.ToASCII(s)
 	if err != nil {
 		return "", fmt.Errorf("invalid domain %q: %w", s, err)
@@ -104,7 +118,15 @@ func normalizeDomain(s string) (string, error) {
 }
 
 // matches reports whether name, which must be normalized, is matched by
-// the pattern.
+// the pattern. For the pattern "*.example.com":
+//
+//	www.example.com        matches
+//	a.b.example.com        does not match (more than one label)
+//	example.com            does not match (the apex)
+//
+// "**.example.com" also matches a.b.example.com, but not example.com.
+// The match is on whole labels: "badexample.com" matches neither, as the
+// suffix is compared with the dot in front of it.
 func (p domainPattern) matches(name string) bool {
 	switch p.kind {
 	case domainExact:
@@ -120,6 +142,7 @@ func (p domainPattern) matches(name string) bool {
 	}
 }
 
+// String returns the pattern in the form it is written in rules.
 func (p domainPattern) String() string {
 	switch p.kind {
 	case domainWildcard:
@@ -131,6 +154,9 @@ func (p domainPattern) String() string {
 	}
 }
 
+// MarshalText, UnmarshalText, MarshalBinary and UnmarshalBinary let
+// patterns be read from the YAML of the rules label and stored in the
+// state database in their normalized form. Reading always validates.
 func (p domainPattern) MarshalText() ([]byte, error) {
 	return []byte(p.String()), nil
 }
@@ -153,6 +179,7 @@ func (p *domainPattern) UnmarshalBinary(data []byte) error {
 	return p.UnmarshalText(data)
 }
 
+// domainsList is the "domains" list of a rule.
 type domainsList []domainPattern
 
 func (d domainsList) MarshalLogArray(enc zapcore.ArrayEncoder) error {
@@ -167,6 +194,8 @@ func (d domainsList) MarshalLogArray(enc zapcore.ArrayEncoder) error {
 // be normalized.
 func (d domainsList) matches(name string) bool {
 	name = asciiLower(strings.TrimSuffix(name, "."))
+	// names with control characters, empty labels or bytes above ASCII are
+	// not matched by any pattern, wildcards included
 	if !plainName(name) {
 		return false
 	}

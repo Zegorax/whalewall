@@ -19,15 +19,31 @@ import (
 	"github.com/capnspacehook/whalewall/dnsproxy"
 )
 
+// How domain rules work, in short: the rules of a container accept traffic
+// to a timed set of addresses, which starts out empty. The container's DNS
+// traffic is redirected (nftables DNAT) to the resolver in the dnsproxy
+// package, listening on the gateway address of the container's network.
+// When the container asks for a name one of its rules allows, the resolver
+// puts the addresses of the answer into that rule's set, with a timeout,
+// before it returns the answer. Names no rule allows are not resolved and
+// never leave the host, so the container has no address to connect to.
 const (
+	// natTableName is the table the DNS redirect rules are in. It is
+	// separate from Docker's tables so -clear and cleanup can remove it
+	// without touching anything of Docker's.
 	natTableName = "whalewall-nat"
 	natChainName = "prerouting"
 	// natPriority is just before Docker's own destination NAT rules
 	natPriority = nftables.ChainPriority(-110)
 
+	// domainSetPrefix starts the names of the sets of allowed addresses
+	// (see domainSetName), so the sets of a container can be found again
 	domainSetPrefix = "ww-"
-	dnsPort         = 53
+	// dnsPort is the port containers send DNS queries to
+	dnsPort = 53
 
+	// defaultDNSPort is the port the resolver listens on, on the gateway
+	// address of each network, unless DNSOptions.Port is set (-dns-port)
 	defaultDNSPort = 5353
 )
 
@@ -60,7 +76,10 @@ func WithIsolateInvalidRules() Option {
 	}
 }
 
-// WithDNS enables rules that allow traffic by domain name.
+// WithDNS enables rules that allow traffic by domain name. Without it the
+// resolver is not started, no NAT rules are created and a rule with
+// "domains" is invalid (the container's rules are then handled like any
+// other invalid rules, see WithIsolateInvalidRules).
 func WithDNS(opts DNSOptions) Option {
 	return func(r *RuleManager) {
 		r.dnsEnabled = true
@@ -71,7 +90,8 @@ func WithDNS(opts DNSOptions) Option {
 	}
 }
 
-// dnsServer is the part of [dnsproxy.Server] the rule manager uses.
+// dnsServer is the part of [dnsproxy.Server] the rule manager uses. It is an
+// interface so tests can replace the resolver.
 type dnsServer interface {
 	Acquire(addr netip.AddrPort) error
 	Release(addr netip.AddrPort)
@@ -80,10 +100,13 @@ type dnsServer interface {
 	Close()
 }
 
-// domainPolicy is the DNS policy of a container with domain rules.
+// domainPolicy is the DNS policy of a container with domain rules. It
+// connects the resolver (which names are allowed, from the rules) to the
+// firewall (the sets those names' addresses are added to).
 type domainPolicy struct {
-	id    string
-	name  string
+	id   string
+	name string
+	// rules are the container's rules that have domains
 	rules []domainRule
 	// addrs are the container addresses the policy is registered for
 	addrs []netip.Addr
@@ -107,7 +130,11 @@ const maxSetAddrs = 4096
 var errTooManyAddrs = fmt.Errorf("more than %d addresses allowed by one rule", maxSetAddrs)
 
 // reserve records addrs as allowed in set, or fails without recording
-// anything if that would exceed maxSetAddrs.
+// anything if that would exceed maxSetAddrs. It keeps the expiry time of
+// every address to count, as the kernel doesn't tell how many elements a set
+// has. Adding an address that is already allowed only extends it. allowAddrs
+// calls it before anything is added to the kernel, so a refused answer
+// changes nothing.
 func (p *domainPolicy) reserve(set *nftables.Set, addrs []dnsproxy.Resolved) error {
 	p.liveMtx.Lock()
 	defer p.liveMtx.Unlock()
@@ -128,6 +155,8 @@ func (p *domainPolicy) reserve(set *nftables.Set, addrs []dnsproxy.Resolved) err
 			fresh++
 		}
 	}
+	// the common case is below the limit and doesn't need to clean up;
+	// expired entries are only removed when they could make the difference
 	if len(m)+fresh > maxSetAddrs {
 		// forget what has expired and look again
 		for a, exp := range m {
@@ -145,6 +174,7 @@ func (p *domainPolicy) reserve(set *nftables.Set, addrs []dnsproxy.Resolved) err
 			return errTooManyAddrs
 		}
 	}
+	// an address allowed twice keeps the later of the two expiry times
 	for _, a := range addrs {
 		if exp := now.Add(a.TTL); exp.After(m[a.Addr]) {
 			m[a.Addr] = exp
@@ -154,11 +184,15 @@ func (p *domainPolicy) reserve(set *nftables.Set, addrs []dnsproxy.Resolved) err
 	return nil
 }
 
+// domainRule is one rule with domains: the names it allows and, per IP
+// family, the set that holds the addresses those names resolved to.
 type domainRule struct {
 	domains domainsList
 	sets    map[*family]*nftables.Set
 }
 
+// hasDomainRules reports whether any output rule of cfg has domains, which
+// is when the container needs the resolver.
 func hasDomainRules(cfg config) bool {
 	for _, rule := range cfg.Output {
 		if len(rule.Domains) != 0 {
@@ -169,17 +203,26 @@ func hasDomainRules(cfg config) bool {
 }
 
 // domainSetName returns the name of the set holding the allowed
-// addresses of a domain rule.
+// addresses of a domain rule: the prefix, the first 12 characters of the
+// container ID (what the chain names use as well) and the index of the rule
+// in the container's rules. The trailing "4" is the IP family.
 func domainSetName(id string, ruleIdx int) string {
 	return fmt.Sprintf("%s%s-%d-4", domainSetPrefix, id[:12], ruleIdx)
 }
 
+// domainSetPrefixFor returns the start of the names of all sets of a
+// container, whatever their rule index and family.
 func domainSetPrefixFor(id string) string {
 	return domainSetPrefix + id[:12] + "-"
 }
 
 // createDomainRules creates the set that holds the allowed addresses of
-// a rule with domains and the rules that allow traffic to them.
+// a rule with domains and the rules that allow traffic to them. The rules
+// are the normal ones for the rule's ports and protocol, with a lookup in
+// the set in place of fixed destination addresses. Nothing is in the set
+// yet, so until the container resolves an allowed name the rule accepts
+// nothing. HasTimeout makes the kernel remove each address when its
+// timeout, set in allowAddrs, ends.
 func (r *RuleManager) createDomainRules(nfc firewallClient, logger *zap.Logger, st *famState, ruleIdx int, rule ruleDetails) ([]*nftables.Rule, error) {
 	set := &nftables.Set{
 		Table:      st.fam.table,
@@ -213,7 +256,9 @@ func (r *RuleManager) createDomainRules(nfc firewallClient, logger *zap.Logger, 
 	return nftRules, nil
 }
 
-// cleanupDomainState removes the sets created for a container.
+// cleanupDomainState removes the sets created for a container; used when
+// creating the container's rules is canceled, together with the removal of
+// its chain.
 func (r *RuleManager) cleanupDomainState(nfc firewallClient, logger *zap.Logger, st *famState) {
 	for _, set := range st.domainSets {
 		nfc.DelSet(set)
@@ -223,7 +268,9 @@ func (r *RuleManager) cleanupDomainState(nfc firewallClient, logger *zap.Logger,
 	}
 }
 
-// deleteDomainSets removes all sets of a container.
+// deleteDomainSets removes all sets of a container, found by name. Unlike
+// cleanupDomainState it works after a restart of whalewall too, when only
+// the container's ID is known.
 func (r *RuleManager) deleteDomainSets(nfc firewallClient, logger *zap.Logger, id string) {
 	prefix := domainSetPrefixFor(id)
 	for _, fam := range families {
@@ -244,6 +291,8 @@ func (r *RuleManager) deleteDomainSets(nfc firewallClient, logger *zap.Logger, i
 	}
 }
 
+// natFamilyTable and natFamilyChain describe the NAT table and chain of an
+// IP family. The parameter selects the family.
 func natFamilyTable(*family) *nftables.Table {
 	return &nftables.Table{Name: natTableName, Family: nftables.TableFamilyIPv4}
 }
@@ -270,11 +319,16 @@ func (r *RuleManager) ensureNAT(nfc firewallClient, fam *family) error {
 }
 
 // createDNATRules returns rules that redirect DNS queries of a container
-// to the resolver listening on gateway.
+// to the resolver listening on gateway, one for UDP and one for TCP. Only
+// packets from the container's own address and to port 53 are redirected,
+// to whatever address they were sent to, so the container doesn't need to
+// know the resolver's address and DNS to any server ends up at the filter.
 func createDNATRules(fam *family, id string, contAddr, gateway []byte, port uint16) []*nftables.Rule {
 	chain := natFamilyChain(fam)
 	nfproto := uint32(unix.NFPROTO_IPV4)
 
+	// the rules are tagged with the container ID (UserData) so they can be
+	// found and deleted with the container
 	rules := make([]*nftables.Rule, 0, 2)
 	for _, proto := range []int{unix.IPPROTO_UDP, unix.IPPROTO_TCP} {
 		exprs := matchAddrExprs(contAddr, fam.srcOffset)
@@ -317,6 +371,8 @@ func (r *RuleManager) deleteDNATRules(nfc firewallClient, logger *zap.Logger, id
 	}
 }
 
+// dnsEndpoint is where one address of a container sends its DNS queries:
+// the gateway of the network the address is on.
 type dnsEndpoint struct {
 	fam       *family
 	netName   string
@@ -326,7 +382,10 @@ type dnsEndpoint struct {
 }
 
 // dnsEndpoints returns the resolver address for every address of the
-// container.
+// container. The resolver listens on the gateway address of the network
+// because that address is the host as the container sees it, and exists
+// before the container does, so no address has to be chosen per container.
+// Networks without a gateway address are skipped.
 func dnsEndpoints(st *famState, networks map[string]*network.EndpointSettings) []dnsEndpoint {
 	eps := make([]dnsEndpoint, 0, len(st.addrs))
 	for netName, contAddr := range st.addrs {
@@ -351,7 +410,10 @@ func dnsEndpoints(st *famState, networks map[string]*network.EndpointSettings) [
 }
 
 // createDNSAccessRules returns rules that allow a container to reach
-// the resolver on its network's gateway.
+// the resolver on its network's gateway, over UDP and TCP on the resolver's
+// port. The redirect changes the destination of DNS queries to that
+// address and port; the container's rules still have to accept the
+// result.
 func (r *RuleManager) createDNSAccessRules(nfc firewallClient, logger *zap.Logger, id string, st *famState, eps []dnsEndpoint) ([]*nftables.Rule, error) {
 	var nftRules []*nftables.Rule
 	for _, ep := range eps {
@@ -378,7 +440,10 @@ func (r *RuleManager) createDNSAccessRules(nfc firewallClient, logger *zap.Logge
 
 // registerDNS makes the resolver answer queries of a container
 // according to its domain rules, and redirects the container's DNS
-// traffic to it.
+// traffic to it. The steps are: build the policy from the rules, install
+// the redirect, start listening on the gateways, and finally register the
+// policy, which is the point after which queries of the container are
+// answered.
 func (r *RuleManager) registerDNS(nfc firewallClient, id, name string, cfg config, states []*famState, endpoints []dnsEndpoint) error {
 	if !hasDomainRules(cfg) {
 		return nil
@@ -398,7 +463,7 @@ func (r *RuleManager) registerDNS(nfc firewallClient, id, name string, cfg confi
 		policy.rules = append(policy.rules, dr)
 	}
 
-	// redirect DNS traffic to the resolver
+	// redirect DNS traffic to the resolver, one family at a time
 	for _, fam := range families {
 		var famEndpoints []dnsEndpoint
 		for _, ep := range endpoints {
@@ -445,6 +510,9 @@ func (r *RuleManager) registerDNS(nfc firewallClient, id, name string, cfg confi
 		}
 	}
 
+	// the resolver tells containers apart by source address, so the
+	// policy is registered for every address of the container, and the
+	// resolver listens on every gateway address
 	for _, ep := range endpoints {
 		addr, _ := netip.AddrFromSlice(ep.contAddr)
 		policy.addrs = append(policy.addrs, addr)
@@ -465,6 +533,8 @@ func (r *RuleManager) registerDNS(nfc firewallClient, id, name string, cfg confi
 		gateways[ep.gateway] = true
 	}
 
+	// Match decides which names are resolved at all; Allow is called with
+	// the addresses of an answer to a name that matched.
 	registered := &dnsproxy.Policy{
 		Name:  name,
 		Match: policy.matches,
@@ -492,6 +562,7 @@ func (r *RuleManager) registerDNS(nfc firewallClient, id, name string, cfg confi
 	return nil
 }
 
+// matches reports whether any rule of the container allows name.
 func (p *domainPolicy) matches(name string) bool {
 	for _, rule := range p.rules {
 		if rule.domains.matches(name) {
@@ -502,7 +573,13 @@ func (p *domainPolicy) matches(name string) bool {
 }
 
 // allowAddrs adds the addresses an allowed name resolved to to the sets
-// of the rules that match the name.
+// of the rules that match the name. Only the rules whose domains match are
+// opened: a name allowed by one rule doesn't open the destinations of
+// another rule of the container. The limit is checked for all sets before
+// anything is added, and the elements are written in one flush, so the
+// firewall already allows the addresses when the resolver returns the
+// answer; if this fails the container gets an error instead of an
+// address it can't use.
 func (r *RuleManager) allowAddrs(p *domainPolicy, qname string, addrs []dnsproxy.Resolved) error {
 	nfc, err := r.newFirewallClient()
 	if err != nil {
@@ -564,6 +641,8 @@ func (r *RuleManager) unregisterDNS(id string) {
 	}
 }
 
+// releaseDNSLocked unregisters a policy and gives back the resolver
+// addresses it acquired. dnsMtx must be held.
 func (r *RuleManager) releaseDNSLocked(p *domainPolicy) {
 	r.dns.Unregister(p.addrs, p.registered)
 	for _, l := range p.listeners {
@@ -571,7 +650,10 @@ func (r *RuleManager) releaseDNSLocked(p *domainPolicy) {
 	}
 }
 
-// initDNS creates the resolver.
+// initDNS creates the resolver. It is created when whalewall starts but
+// only listens once a container with domain rules needs an address, see
+// registerDNS. Upstream servers are the ones given with -dns-upstream, or
+// the host's from /etc/resolv.conf.
 func (r *RuleManager) initDNS() error {
 	upstreams := r.dnsOpts.Upstreams
 	if len(upstreams) == 0 {
@@ -594,7 +676,9 @@ func (r *RuleManager) initDNS() error {
 	return nil
 }
 
-// clearNAT removes the tables created for DNS redirection.
+// clearNAT removes the tables created for DNS redirection. It also runs
+// for a whalewall started without -dns, because a previous run may have
+// created them.
 func (r *RuleManager) clearNAT() error {
 	nfc, err := r.newFirewallClient()
 	if err != nil {
