@@ -70,13 +70,19 @@ type RuleManager struct {
 	db        database.DB
 	dockerCli dockerClient
 
+	// dnsEnabled is set by WithDNS. dns is the resolver, created by
+	// initDNS when whalewall starts; dnsPolicies holds the policy of every
+	// container with domain rules by container ID, guarded by dnsMtx.
 	dnsEnabled  bool
 	dnsOpts     DNSOptions
 	dns         dnsServer
 	dnsMtx      sync.Mutex
 	dnsPolicies map[string]*domainPolicy
-	local       *localAddrs
-	// interfaceAddrs lists the addresses of the host's interfaces
+	// local tells which addresses belong to the host, domain rules never
+	// allow those
+	local *localAddrs
+	// interfaceAddrs lists the addresses of the host's interfaces; a field
+	// so tests can replace it
 	interfaceAddrs func() ([]net.Addr, error)
 }
 
@@ -89,6 +95,8 @@ type containerDetails struct {
 	isNew     bool
 }
 
+// NewRuleManager creates a RuleManager. Without opts it behaves like it
+// did before options existed; each option turns on one new feature.
 func NewRuleManager(ctx context.Context, logger *zap.Logger, dbFile string, timeout time.Duration, opts ...Option) (*RuleManager, error) {
 	r := RuleManager{
 		stopping: make(chan struct{}),
@@ -127,6 +135,8 @@ func (r *RuleManager) Start(ctx context.Context) error {
 	if err := r.init(ctx); err != nil {
 		return err
 	}
+	// the resolver is created before any container is handled, as
+	// containers that exist already are processed right after this
 	if r.dnsEnabled {
 		if err := r.initDNS(); err != nil {
 			return err
@@ -326,6 +336,8 @@ func (r *RuleManager) Stop() {
 	close(r.stopping)
 	r.wg.Wait()
 
+	// stop the resolver after the workers, which may still be registering
+	// containers with it
 	if r.dns != nil {
 		r.dns.Close()
 	}
