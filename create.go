@@ -95,20 +95,40 @@ type famState struct {
 	domainSets map[int]*nftables.Set
 }
 
-// containerAddrs returns the IPv4 addresses of a container by network
-// name. A network without a parsable address is an error, as it was before
-// the family abstraction was added: such a container can't be filtered.
-func containerAddrs(networks map[string]*network.EndpointSettings, contName string) (map[string][]byte, error) {
-	addrs := make(map[string][]byte, len(networks))
+// containerAddrs returns the IPv4 and IPv6 addresses of a container by
+// network name. IPv6 addresses are only returned if ipv6 is true. A network
+// without a parsable address is an error, as it was before IPv6 was
+// supported: such a container can't be filtered.
+func containerAddrs(networks map[string]*network.EndpointSettings, contName string, ipv6 bool) (map[string][]byte, map[string][]byte, error) {
+	addrs4 := make(map[string][]byte, len(networks))
+	addrs6 := make(map[string][]byte)
 	for netName, netSettings := range networks {
-		addr, err := netip.ParseAddr(netSettings.IPAddress)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing IP of container: %q: %w", contName, err)
+		globalIPv6 := netSettings.GlobalIPv6Address
+		if !ipv6 {
+			globalIPv6 = ""
 		}
-		addrs[netName] = addrBytes(addr)
+		if netSettings.IPAddress == "" && globalIPv6 == "" {
+			// produces the same error as before IPv6 was supported
+			_, err := netip.ParseAddr(netSettings.IPAddress)
+			return nil, nil, fmt.Errorf("error parsing IP of container: %q: %w", contName, err)
+		}
+		if netSettings.IPAddress != "" {
+			addr, err := netip.ParseAddr(netSettings.IPAddress)
+			if err != nil {
+				return nil, nil, fmt.Errorf("error parsing IP of container: %q: %w", contName, err)
+			}
+			addrs4[netName] = addrBytes(addr)
+		}
+		if globalIPv6 != "" {
+			addr, err := netip.ParseAddr(globalIPv6)
+			if err != nil {
+				return nil, nil, fmt.Errorf("error parsing IPv6 address of container: %q: %w", contName, err)
+			}
+			addrs6[netName] = addrBytes(addr)
+		}
 	}
 
-	return addrs, nil
+	return addrs4, addrs6, nil
 }
 
 // parseRules parses and validates the rules of a container's label. Besides
@@ -211,8 +231,17 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 		}
 	}
 
+	if !r.ipv6Enabled {
+		for _, netSettings := range container.NetworkSettings.Networks {
+			if netSettings.GlobalIPv6Address != "" {
+				logger.Warn("the container has an IPv6 address, its IPv6 traffic is not managed; start whalewall with -ipv6 to manage it")
+				break
+			}
+		}
+	}
+
 	// ensure specified networks and containers in rules are valid
-	addrs4, err := containerAddrs(container.NetworkSettings.Networks, contName)
+	addrs4, addrs6, err := containerAddrs(container.NetworkSettings.Networks, contName, r.ipv6Enabled)
 	if err != nil {
 		return err
 	}
@@ -220,12 +249,26 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 	// the family of its address. A rule that names a network is valid if
 	// the container is on it; a family without an address on it just
 	// creates nothing for the rule.
-	allNets := make(map[string][]byte, len(addrs4))
-	for netName, addr := range addrs4 {
-		allNets[netName] = addr
-	}
+	allNets := make(map[string][]byte, len(container.NetworkSettings.Networks))
 	// rules are created for each family the container has addresses in
-	states := []*famState{{fam: family4, addrs: addrs4}}
+	var states []*famState
+	if len(addrs4) != 0 {
+		states = append(states, &famState{fam: family4, addrs: addrs4})
+		for netName, addr := range addrs4 {
+			allNets[netName] = addr
+		}
+	}
+	if len(addrs6) != 0 {
+		if err := r.ensureIPv6BaseRules(); err != nil {
+			return fmt.Errorf("container %q has an IPv6 address but its IPv6 traffic can't be managed, no rules were created: %w", contName, err)
+		}
+		states = append(states, &famState{fam: family6, addrs: addrs6})
+		for netName, addr := range addrs6 {
+			if _, ok := allNets[netName]; !ok {
+				allNets[netName] = addr
+			}
+		}
+	}
 
 	nfc, err := r.newFirewallClient()
 	if err != nil {
@@ -426,6 +469,13 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 			stLogger.Error("error creating waiting rules", zap.Error(err))
 		}
 
+		if st.fam.v6 {
+			// IPv6 can't work without neighbor discovery
+			if err := createRules(st, createICMPv6Rules(st.chain, container.ID), true); err != nil {
+				stLogger.Error("error creating ICMPv6 rules", zap.Error(err))
+			}
+		}
+
 		// if no rules were explicitly specified, only the rule that drops
 		// traffic to/from the container will be added
 		if !configExists {
@@ -458,7 +508,11 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 			stLogger.Error("error creating output rules", zap.Error(err))
 		}
 
-		// handle port mapping rules
+		// handle port mapping rules, only IPv4 port mappings are
+		// supported
+		if st.fam.v6 {
+			continue
+		}
 		stLogger.Debug("creating mapped port rules")
 		portMapRules, err := r.createPortMappingRules(nfc, stLogger, container, contName, rulesCfg.MappedPorts, st.addrs, st.chain)
 		if err != nil {
@@ -514,11 +568,64 @@ func (r *RuleManager) createContainerRules(ctx context.Context, container types.
 
 	logger.Debug("adding to database")
 
-	if err := r.addContainer(ctx, tx, container.ID, contName, service, addrs4, estContainers); err != nil {
+	dbAddrs := make(map[string][]byte, len(addrs4)+len(addrs6))
+	for netName, addr := range addrs4 {
+		dbAddrs[netName+"|4"] = addr
+	}
+	for netName, addr := range addrs6 {
+		dbAddrs[netName+"|6"] = addr
+	}
+	if err := r.addContainer(ctx, tx, container.ID, contName, service, dbAddrs, estContainers); err != nil {
 		return fmt.Errorf("error adding container information to database: %w", err)
 	}
 
 	return nil
+}
+
+// createICMPv6Rules returns rules that allow the ICMPv6 messages IPv6
+// can't function without: neighbor discovery (router and neighbor
+// solicitation and advertisement, and redirect) and packet too big.
+func createICMPv6Rules(chain *nftables.Chain, id string) []*nftables.Rule {
+	newRule := func(exprs ...expr.Any) *nftables.Rule {
+		base := make([]expr.Any, 0, 5+len(exprs))
+		base = append(base,
+			// [ meta load l4proto => reg 1 ]
+			&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+			// [ cmp eq reg 1 ... ]
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_ICMPV6}},
+			// [ payload load 1b @ transport header + 0 => reg 1 ]
+			&expr.Payload{
+				OperationType: expr.PayloadLoad,
+				Len:           1,
+				Base:          expr.PayloadBaseTransportHeader,
+				Offset:        0,
+				DestRegister:  1,
+			},
+		)
+		base = append(base, exprs...)
+		base = append(base, &expr.Counter{}, acceptVerdict)
+		return &nftables.Rule{
+			Table:    chain.Table,
+			Chain:    chain,
+			Exprs:    base,
+			UserData: []byte(id),
+		}
+	}
+
+	return []*nftables.Rule{
+		// Neighbor discovery: router solicitation (133), neighbor
+		// solicitation and advertisement (135, 136). Router
+		// advertisements (134) and redirects (137) are not allowed: a
+		// container could use them to take over the IPv6 configuration
+		// and routes of every other container on the network.
+		newRule(&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{133}}),
+		newRule(
+			&expr.Cmp{Op: expr.CmpOpGte, Register: 1, Data: []byte{135}},
+			&expr.Cmp{Op: expr.CmpOpLte, Register: 1, Data: []byte{136}},
+		),
+		// packet too big
+		newRule(&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{2}}),
+	}
 }
 
 // stripName removes the leading "/" from a container name if necessary.
@@ -612,11 +719,18 @@ func (r *RuleManager) populateOutputRules(ctx context.Context, tx database.TX, c
 				estConts[cont.ID] = struct{}{}
 				found = true
 
-				addr, err := netip.ParseAddr(dstNetwork.IPAddress)
-				if err != nil {
-					return fmt.Errorf("error parsing IP of container %q from network %q: %w", ruleCfg.Container, dstNetName, err)
+				var contAddrs []netip.Addr
+				for _, addrStr := range []string{dstNetwork.IPAddress, dstNetwork.GlobalIPv6Address} {
+					if addrStr == "" {
+						continue
+					}
+					addr, err := netip.ParseAddr(addrStr)
+					if err != nil {
+						return fmt.Errorf("error parsing IP of container %q from network %q: %w", ruleCfg.Container, dstNetName, err)
+					}
+					contAddrs = append(contAddrs, addr)
 				}
-				cfg.Output[i].contAddrs = []netip.Addr{addr}
+				cfg.Output[i].contAddrs = contAddrs
 				break
 			}
 
@@ -1075,7 +1189,15 @@ func (r *RuleManager) createWaitingContainerRules(ctx context.Context, nfc firew
 				ruleCfg.Container,
 			)
 		}
-		srcAddr, err := netip.ParseAddr(srcNetwork.IPAddress)
+		srcAddrStr := srcNetwork.IPAddress
+		if st.fam.v6 {
+			srcAddrStr = srcNetwork.GlobalIPv6Address
+		}
+		if srcAddrStr == "" {
+			// the source container has no address of this family
+			continue
+		}
+		srcAddr, err := netip.ParseAddr(srcAddrStr)
 		if err != nil {
 			return nil, fmt.Errorf("error parsing IP of container %q from network %q: %w", ruleCfg.Container, srcNetName, err)
 		}
@@ -1083,6 +1205,9 @@ func (r *RuleManager) createWaitingContainerRules(ctx context.Context, nfc firew
 		// find destination container IP (this container)
 		dstNetName, dstNetwork, ok := findNetwork(ruleCfg.Network, project, addrs)
 		if !ok {
+			if st.fam.v6 {
+				continue
+			}
 			return nil, fmt.Errorf("network %q not found", ruleCfg.Network)
 		}
 		dstAddr, ok := netip.AddrFromSlice(dstNetwork)

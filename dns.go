@@ -67,6 +67,14 @@ type DNSOptions struct {
 // Option configures a [RuleManager].
 type Option func(*RuleManager)
 
+// WithIPv6 makes whalewall manage the IPv6 traffic of containers that have
+// an IPv6 address. Without it IPv6 traffic is not touched.
+func WithIPv6() Option {
+	return func(r *RuleManager) {
+		r.ipv6Enabled = true
+	}
+}
+
 // WithIsolateInvalidRules isolates a container completely if its rules
 // are invalid. Without it a container with invalid rules gets no rules at
 // all and so is not restricted, an error is logged.
@@ -204,10 +212,14 @@ func hasDomainRules(cfg config) bool {
 
 // domainSetName returns the name of the set holding the allowed
 // addresses of a domain rule: the prefix, the first 12 characters of the
-// container ID (what the chain names use as well) and the index of the rule
-// in the container's rules. The trailing "4" is the IP family.
-func domainSetName(id string, ruleIdx int) string {
-	return fmt.Sprintf("%s%s-%d-4", domainSetPrefix, id[:12], ruleIdx)
+// container ID (what the chain names use as well), the index of the rule
+// in the container's rules and the IP family, 4 or 6.
+func domainSetName(id string, ruleIdx int, fam *family) string {
+	suffix := "4"
+	if fam.v6 {
+		suffix = "6"
+	}
+	return fmt.Sprintf("%s%s-%d-%s", domainSetPrefix, id[:12], ruleIdx, suffix)
 }
 
 // domainSetPrefixFor returns the start of the names of all sets of a
@@ -226,7 +238,7 @@ func domainSetPrefixFor(id string) string {
 func (r *RuleManager) createDomainRules(nfc firewallClient, logger *zap.Logger, st *famState, ruleIdx int, rule ruleDetails) ([]*nftables.Rule, error) {
 	set := &nftables.Set{
 		Table:      st.fam.table,
-		Name:       domainSetName(rule.contID, ruleIdx),
+		Name:       domainSetName(rule.contID, ruleIdx, st.fam),
 		KeyType:    st.fam.addrKeyType,
 		HasTimeout: true,
 	}
@@ -276,6 +288,7 @@ func (r *RuleManager) deleteDomainSets(nfc firewallClient, logger *zap.Logger, i
 	for _, fam := range families {
 		sets, err := nfc.GetSets(fam.table)
 		if err != nil {
+			// the table may not exist, for example for IPv6
 			logger.Debug("error listing sets", zap.Stringer("family", fam), zap.Error(err))
 			continue
 		}
@@ -293,8 +306,12 @@ func (r *RuleManager) deleteDomainSets(nfc firewallClient, logger *zap.Logger, i
 
 // natFamilyTable and natFamilyChain describe the NAT table and chain of an
 // IP family. The parameter selects the family.
-func natFamilyTable(*family) *nftables.Table {
-	return &nftables.Table{Name: natTableName, Family: nftables.TableFamilyIPv4}
+func natFamilyTable(fam *family) *nftables.Table {
+	t := &nftables.Table{Name: natTableName, Family: nftables.TableFamilyIPv4}
+	if fam.v6 {
+		t.Family = nftables.TableFamilyIPv6
+	}
+	return t
 }
 
 func natFamilyChain(fam *family) *nftables.Chain {
@@ -326,6 +343,9 @@ func (r *RuleManager) ensureNAT(nfc firewallClient, fam *family) error {
 func createDNATRules(fam *family, id string, contAddr, gateway []byte, port uint16) []*nftables.Rule {
 	chain := natFamilyChain(fam)
 	nfproto := uint32(unix.NFPROTO_IPV4)
+	if fam.v6 {
+		nfproto = unix.NFPROTO_IPV6
+	}
 
 	// the rules are tagged with the container ID (UserData) so they can be
 	// found and deleted with the container
@@ -393,7 +413,11 @@ func dnsEndpoints(st *famState, networks map[string]*network.EndpointSettings) [
 		if settings == nil {
 			continue
 		}
-		gateway, err := netip.ParseAddr(settings.Gateway)
+		gw := settings.Gateway
+		if st.fam.v6 {
+			gw = settings.IPv6Gateway
+		}
+		gateway, err := netip.ParseAddr(gw)
 		if err != nil {
 			continue
 		}
@@ -536,8 +560,9 @@ func (r *RuleManager) registerDNS(nfc firewallClient, id, name string, cfg confi
 	// Match decides which names are resolved at all; Allow is called with
 	// the addresses of an answer to a name that matched.
 	registered := &dnsproxy.Policy{
-		Name:  name,
-		Match: policy.matches,
+		Name:    name,
+		Match:   policy.matches,
+		HasIPv6: hasFamily(states, family6),
 		Reject: func(a netip.Addr) bool {
 			return gateways[a] || r.local.contains(a)
 		},
@@ -560,6 +585,16 @@ func (r *RuleManager) registerDNS(nfc firewallClient, id, name string, cfg confi
 	r.dnsMtx.Unlock()
 
 	return nil
+}
+
+// hasFamily reports whether any of the states is the state of fam.
+func hasFamily(states []*famState, fam *family) bool {
+	for _, st := range states {
+		if st.fam == fam {
+			return true
+		}
+	}
+	return false
 }
 
 // matches reports whether any rule of the container allows name.

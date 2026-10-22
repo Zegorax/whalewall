@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"syscall"
 
 	"github.com/docker/docker/client"
@@ -48,6 +49,18 @@ func (r *RuleManager) clearRules(ctx context.Context) error {
 	}
 
 	for _, fam := range families {
+		if fam.v6 {
+			// only clear IPv6 if whalewall created rules for it
+			chains, err := nfc.ListChainsOfTableFamily(nftables.TableFamilyIPv6)
+			if err != nil {
+				return fmt.Errorf("error listing IPv6 chains: %w", err)
+			}
+			if !slices.ContainsFunc(chains, func(c *nftables.Chain) bool {
+				return c.Table.Name == filterTableName && c.Name == whalewallChainName
+			}) {
+				continue
+			}
+		}
 		if err := r.clearFamily(nfc, fam); err != nil {
 			return err
 		}
@@ -217,6 +230,10 @@ func (r *RuleManager) deleteContainerRules(ctx context.Context, id, name string)
 		// delete rules from whalewall chain
 		rules, err := nfc.GetRules(fam.table, fam.whalewallChain)
 		if err != nil {
+			if fam.v6 {
+				// IPv6 is not managed
+				continue
+			}
 			return fmt.Errorf("error getting rules of chain %s: %w", fam.whalewallChain.Name, err)
 		}
 		deleteRulesFromContainer(logger, nfc, rules, id)
@@ -247,7 +264,9 @@ func (r *RuleManager) deleteContainerRules(ctx context.Context, id, name string)
 			}
 			rules, err := nfc.GetRules(chain.Table, chain)
 			if err != nil {
-				logger.Error("error getting rules of chain", zap.String("chain.name", chain.Name), zap.Error(err))
+				if !fam.v6 {
+					logger.Error("error getting rules of chain", zap.String("chain.name", chain.Name), zap.Error(err))
+				}
 				continue
 			}
 			deleteRulesFromContainer(logger, nfc, rules, id)

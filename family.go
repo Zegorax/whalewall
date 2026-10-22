@@ -8,9 +8,11 @@ import (
 )
 
 // family describes the nftables objects whalewall manages for one IP
-// family. Docker keeps the rules of each IP family in separate tables
-// that share the same name, so every object exists once per family.
+// family. Docker keeps IPv4 and IPv6 rules in separate tables that share
+// the same name, so every object exists once per family.
 type family struct {
+	// v6 is true for the IPv6 family
+	v6 bool
 	// table is Docker's filter table of this family
 	table *nftables.Table
 	// whalewallChain is whalewall's chain in that table; Docker's chains
@@ -42,9 +44,36 @@ var (
 		dstOffset:      dstAddrOffset,
 	}
 
+	filterTable6 = &nftables.Table{
+		Name:   filterTableName,
+		Family: nftables.TableFamilyIPv6,
+	}
+	whalewallChain6 = &nftables.Chain{
+		Name:  whalewallChainName,
+		Table: filterTable6,
+		Type:  nftables.ChainTypeFilter,
+	}
+	containerAddrSet6 = &nftables.Set{
+		Table:    filterTable6,
+		Name:     containerAddrSetName,
+		IsMap:    true,
+		KeyType:  nftables.TypeIP6Addr,
+		DataType: nftables.TypeVerdict,
+	}
+	family6 = &family{
+		v6:             true,
+		table:          filterTable6,
+		whalewallChain: whalewallChain6,
+		addrSet:        containerAddrSet6,
+		addrKeyType:    nftables.TypeIP6Addr,
+		addrLen:        16,
+		srcOffset:      8,
+		dstOffset:      24,
+	}
+
 	// families are the IP families whalewall manages; code that has to act
 	// on all of them loops over this
-	families = []*family{family4}
+	families = []*family{family4, family6}
 
 	// srcJumpRule and dstJumpRule jump to a container's chain when a packet
 	// comes from or goes to one of the addresses in the address set
@@ -54,26 +83,30 @@ var (
 
 // String returns the name of the family for logs and error messages.
 func (f *family) String() string {
+	if f.v6 {
+		return "ipv6"
+	}
 	return "ipv4"
 }
 
-// familyOfTable returns the family a table belongs to. Only IPv4 is managed
-// for now, so it is always family4.
-func familyOfTable(*nftables.Table) *family {
+// familyOfTable returns the family a table belongs to.
+func familyOfTable(t *nftables.Table) *family {
+	if t != nil && t.Family == nftables.TableFamilyIPv6 {
+		return family6
+	}
 	return family4
 }
 
-// familyOfAddr returns the family an address belongs to, or nil if
-// whalewall doesn't manage it.
+// familyOfAddr returns the family an address belongs to.
 func familyOfAddr(a netip.Addr) *family {
 	if a.Is4() || a.Is4In6() {
 		return family4
 	}
-	return nil
+	return family6
 }
 
 // addrBytes returns the address in the form it has in a packet header:
-// 4 bytes for IPv4. An IPv4-mapped IPv6 address (::ffff:a.b.c.d) is
+// 4 bytes for IPv4, 16 for IPv6. An IPv4-mapped IPv6 address (::ffff:a.b.c.d) is
 // converted to its IPv4 form first, as that is what such a packet carries.
 func addrBytes(a netip.Addr) []byte {
 	if a.Is4In6() {
@@ -83,8 +116,8 @@ func addrBytes(a netip.Addr) []byte {
 }
 
 // filterIPs returns the entries of ips that belong to f. A range belongs to
-// the family of its first address. Entries of a family that isn't managed
-// are dropped, so a rule that only has those matches nothing.
+// the family of its first address. Entries of the other family are dropped,
+// so a rule that only has those doesn't apply to f at all.
 func (f *family) filterIPs(ips []addrOrRange) []addrOrRange {
 	var out []addrOrRange
 	for _, ip := range ips {

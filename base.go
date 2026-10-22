@@ -38,7 +38,9 @@ var (
 	}
 )
 
-// errNoDockerChain is returned if Docker hasn't created its chains.
+// errNoDockerChain is returned if Docker hasn't created its chains for
+// a family, which is the case for IPv6 when Docker's ip6tables support
+// is disabled.
 var errNoDockerChain = errors.New("couldn't find required Docker chain, is Docker running?")
 
 // createBaseRules creates the rules and sets all container chains
