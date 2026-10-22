@@ -1,0 +1,67 @@
+name: Publish image
+
+# Builds the Dockerfile of the selected ref and pushes it to ghcr.io under
+# the lower-cased name of the repository. Manual only. The tag "latest" is
+# refused so that this can't replace the image the release workflow
+# publishes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to publish, for example pr-1
+        required: true
+        default: pr-1
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check the tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [[ ! "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || [ "$TAG" = latest ]; then
+            echo "::error::invalid tag: $TAG"
+            exit 1
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            VERSION=${{ inputs.tag }}-${{ github.sha }}
+          tags: ${{ steps.image.outputs.name }}:${{ inputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Show the result
+        run: |
+          echo "pushed ${{ steps.image.outputs.name }}:${{ inputs.tag }}"
+          echo "digest ${{ steps.push.outputs.digest }}"
